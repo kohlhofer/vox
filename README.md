@@ -5,6 +5,7 @@ Read text out loud with a good neural voice, from anywhere on your Mac.
 ```sh
 vox "Build finished — all green."
 vox -v am_onyx -s 0.95 "Heads up, I need your input on the migration."
+vox notes.md        # read a file aloud (Markdown is stripped)
 echo "piped text works too" | vox
 vox --stop          # cut off whatever is talking
 ```
@@ -58,18 +59,35 @@ queue. The daemon shuts itself down after 10 minutes idle.
 You rarely need to think about it. If you want to:
 
 - `vox --no-daemon "…"` — synthesize inline, no daemon.
-- `vox --stop` — interrupt current speech and clear the queue.
+- `vox --stop` — interrupt current speech and clear the queue (daemon stays warm).
+- `vox --quit` — shut the daemon down now and free the model from memory.
 - Daemon log lives at `~/.cache/vox/daemon.log`.
+
+## Reading files
+
+Point vox at a file and it reads it aloud, stripping Markdown first (frontmatter,
+headings, list markers, links, emphasis) so it doesn't narrate `#` and URLs:
+
+```sh
+vox README.md
+vox -f ~/notes/standup.md
+```
+
+Long text is split into sentence-sized pieces and synthesized one ahead of
+playback, so it starts within a second or two and pauses naturally between
+paragraphs. `vox --stop` halts it mid-read.
 
 ## Options
 
 ```
-vox [text...]              text to speak ('-' or a pipe reads stdin)
+vox [text...]              text to speak; a file path is read aloud ('-'/pipe = stdin)
+  -f, --file PATH          read this file aloud (Markdown stripped)
   -v, --voice ID           voice id (default: af_bella)
   -s, --speed X            speaking speed 0.5–2.0 (default: 1.1)
   -w, --wait               block until speech finishes (default: return once queued)
   -l, --list-voices        list voices and exit
       --stop               stop current speech and clear the queue
+      --quit               shut down the background voice daemon
       --no-daemon          synthesize inline instead of using the warm daemon
       --engine {auto,kokoro,say}
   -q, --quiet              suppress status messages

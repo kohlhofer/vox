@@ -135,34 +135,38 @@ class Engine:
 
     @classmethod
     def _chunk_text(cls, text: str):
-        """Break text into synthesis-sized pieces. Split on sentence boundaries
-        first so seams fall at natural pauses; sub-split any over-long sentence
-        on clause punctuation, then hard-wrap on spaces as a last resort."""
-        text = " ".join(text.split())
+        """Break text into synthesis-sized pieces. Paragraphs (blank-line
+        separated) are kept apart so each ends with a natural pause; within a
+        paragraph we split on sentence boundaries, sub-split any over-long
+        sentence on clause punctuation, then hard-wrap on spaces as a fallback."""
         cap = cls.MAX_CHUNK_CHARS
         out = []
-        for sent in re.split(r"(?<=[.!?…])\s+", text):
-            if not sent:
+        for para in re.split(r"\n\s*\n", text):
+            para = " ".join(para.split())
+            if not para:
                 continue
-            if len(sent) <= cap:
-                out.append(sent)
-                continue
-            buf = ""
-            for clause in re.split(r"(?<=[;:,—–])\s+", sent):
-                while len(clause) > cap:                     # clause itself too long
-                    cut = clause.rfind(" ", 0, cap)
-                    cut = cut if cut > 0 else cap
-                    out.append(clause[:cut].strip())
-                    clause = clause[cut:].strip()
-                if not buf:
-                    buf = clause
-                elif len(buf) + 1 + len(clause) <= cap:
-                    buf += " " + clause
-                else:
+            for sent in re.split(r"(?<=[.!?…])\s+", para):
+                if not sent:
+                    continue
+                if len(sent) <= cap:
+                    out.append(sent)
+                    continue
+                buf = ""
+                for clause in re.split(r"(?<=[;:,—–])\s+", sent):
+                    while len(clause) > cap:                 # clause itself too long
+                        cut = clause.rfind(" ", 0, cap)
+                        cut = cut if cut > 0 else cap
+                        out.append(clause[:cut].strip())
+                        clause = clause[cut:].strip()
+                    if not buf:
+                        buf = clause
+                    elif len(buf) + 1 + len(clause) <= cap:
+                        buf += " " + clause
+                    else:
+                        out.append(buf)
+                        buf = clause
+                if buf:
                     out.append(buf)
-                    buf = clause
-            if buf:
-                out.append(buf)
         return [c for c in out if c]
 
     # -- Synthesis ---------------------------------------------------------- #
@@ -358,7 +362,7 @@ class Daemon:
         self.engine = Engine(engine=engine, quiet=False)
         self.jobs: "Queue[_Job | None]" = Queue()
         self.last_active = time.monotonic()
-        self._stopping = False
+        self.server = None                      # set by run_daemon; used by `quit`
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._idle_watch, daemon=True).start()
 
@@ -396,6 +400,14 @@ class Daemon:
         if cmd == "stop":
             self._flush()
             self.engine.stop_current()
+            return {"ok": True}
+        if cmd == "quit":
+            self._flush()
+            self.engine.stop_current()
+            if self.server is not None:
+                # shutdown() blocks until serve_forever returns, which waits on
+                # this handler — so trigger it from another thread and reply now.
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"ok": True}
         if cmd == "speak":
             text = (req.get("text") or "").strip()
@@ -454,9 +466,10 @@ def run_daemon(engine: str = "auto") -> int:
         _safe_unlink(SOCK_PATH)            # clear a stale socket from a crash
         server = _Server(SOCK_PATH, _Handler)
         server.app = Daemon(engine=engine)  # type: ignore[attr-defined]
+        server.app.server = server          # so a `quit` request can shut us down
         atexit.register(lambda: _safe_unlink(SOCK_PATH))
         try:
-            server.serve_forever(poll_interval=2.0)
+            server.serve_forever(poll_interval=0.5)   # keeps --quit responsive
         except KeyboardInterrupt:
             pass
         finally:
@@ -537,11 +550,54 @@ def speak_via_daemon(text, voice, speed, wait, engine, quiet) -> bool:
 # CLI                                                                         #
 # --------------------------------------------------------------------------- #
 
-def _read_text(args) -> str:
-    parts = args.text
-    if parts == ["-"] or (not parts and not sys.stdin.isatty()):
+def clean_markdown(md: str) -> str:
+    """Strip common Markdown so a file narrates cleanly rather than reading out
+    '#', '*', and link URLs: drops YAML frontmatter, fenced code, headings,
+    list/quote markers, and horizontal rules; unwraps links to their text and
+    removes emphasis. Blank lines survive as paragraph breaks (the chunker
+    turns those into natural pauses)."""
+    md = re.sub(r"\A﻿?---\r?\n.*?\r?\n---\r?\n", "", md, flags=re.S)  # frontmatter
+    md = re.sub(r"```.*?```", "\n", md, flags=re.S)                        # fenced code
+    md = re.sub(r"~~~.*?~~~", "\n", md, flags=re.S)
+    lines = []
+    for line in md.splitlines():
+        s = line.rstrip()
+        if re.fullmatch(r"\s*[-*_]{3,}\s*", s):      # horizontal rule -> blank
+            lines.append("")
+            continue
+        s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s)       # heading marks
+        s = re.sub(r"^\s*>+\s?", "", s)               # blockquote
+        s = re.sub(r"^\s*[-*+]\s+", "", s)            # bullet list
+        s = re.sub(r"^\s*\d+[.)]\s+", "", s)          # numbered list
+        lines.append(s)
+    text = "\n".join(lines)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)   # images -> alt text
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)    # links -> link text
+    text = re.sub(r"[*_`~]+", "", text)                     # emphasis / inline code
+    text = re.sub(r"[ \t]+", " ", text)                     # collapse spaces (keep \n)
+    text = re.sub(r"\n{3,}", "\n\n", text)                 # collapse blank-line runs
+    return text.strip()
+
+
+def _resolve_text(args) -> str:
+    """Work out what to say. A file — given with --file, or as a single
+    positional argument that happens to be an existing file — is read and
+    stripped of Markdown. Otherwise stdin ('-' or a pipe) or the literal
+    positional text is spoken as typed. Raises ValueError on a bad --file."""
+    path = args.file
+    if not path and len(args.text) == 1 and args.text[0] != "-" and os.path.isfile(args.text[0]):
+        path = args.text[0]
+    if path:
+        if not os.path.isfile(path):
+            raise ValueError(f"no such file: {path}")
+        try:
+            with open(path, encoding="utf-8") as f:
+                return clean_markdown(f.read())
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"can't read {path}: {exc}")
+    if args.text == ["-"] or (not args.text and not sys.stdin.isatty()):
         return sys.stdin.read()
-    return " ".join(parts)
+    return " ".join(args.text)
 
 
 def _print_voices() -> None:
@@ -560,11 +616,16 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  vox \"Build finished — all green.\"\n"
             "  vox -v am_onyx -s 0.95 \"Heads up, I need your input.\"\n"
+            "  vox notes.md           # read a file aloud (Markdown stripped)\n"
             "  echo \"piped text\" | vox\n"
-            "  vox --stop          # cut off whatever is talking\n"
+            "  vox --stop             # cut off whatever is talking\n"
+            "  vox --quit             # shut the background voice daemon down\n"
         ),
     )
-    p.add_argument("text", nargs="*", help="text to speak ('-' or a pipe reads stdin)")
+    p.add_argument("text", nargs="*",
+                   help="text to speak; a file path is read aloud ('-' or a pipe reads stdin)")
+    p.add_argument("-f", "--file", metavar="PATH",
+                   help="read this file aloud (Markdown is stripped before speaking)")
     p.add_argument("-v", "--voice", default=DEFAULT_VOICE, metavar="ID",
                    help=f"voice id (default: {DEFAULT_VOICE}; --list-voices to see all)")
     p.add_argument("-s", "--speed", type=float, default=DEFAULT_SPEED, metavar="X",
@@ -573,6 +634,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="block until speech finishes (default: return once queued)")
     p.add_argument("-l", "--list-voices", action="store_true", help="list voices and exit")
     p.add_argument("--stop", action="store_true", help="stop current speech and clear the queue")
+    p.add_argument("--quit", action="store_true",
+                   help="shut down the background voice daemon (frees the model from memory)")
     p.add_argument("--no-daemon", action="store_true",
                    help="synthesize inline instead of using the warm daemon")
     p.add_argument("--engine", choices=["auto", "kokoro", "say"], default="auto",
@@ -596,9 +659,18 @@ def main(argv=None) -> int:
         _request({"cmd": "stop"})          # silently no-op if no daemon
         return 0
 
-    text = _read_text(args).strip()
+    if args.quit:
+        resp = _request({"cmd": "quit"})
+        _eprint("vox: daemon shut down." if resp else "vox: no daemon running.", args.quiet)
+        return 0
+
+    try:
+        text = _resolve_text(args).strip()
+    except ValueError as exc:
+        _eprint(f"vox: {exc}", args.quiet)
+        return 2
     if not text:
-        _eprint("vox: nothing to say (give text, pipe stdin, or use --list-voices).", args.quiet)
+        _eprint("vox: nothing to say (give text, a file, pipe stdin, or use --list-voices).", args.quiet)
         return 2
 
     if args.voice not in VOICES and args.engine != "say":
