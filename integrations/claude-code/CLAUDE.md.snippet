@@ -1,0 +1,24 @@
+# --- paste into ~/.claude/CLAUDE.md (always-on) instead of using the skill ---
+# A skill is loaded only when the model judges it relevant; this snippet is
+# always in context, so it fires more reliably for proactive "alert me" behavior.
+
+## Voice alerts — speak up with `vox` when I need to act
+
+When something needs my attention and I might not be watching the terminal, say
+it out loud with `vox` (a local text-to-speech CLI; https://github.com/kohlhofer/vox).
+I often have several long jobs going at once, so the note has to tell me *which*
+one without making me come look.
+
+**Speak — and basically only — when:** a long task I'm waiting on finishes
+(passed or failed); you're blocked and need my input/decision/approval;
+something broke I'd want to know about now. Stay silent for routine progress,
+ordinary replies, and anything I'm already watching.
+
+**What to say:** one short, conversational sentence (~6–14 words). Lead with the
+concern (project/repo/process) so I can tell it apart from my other jobs; say
+what happened and what you need. Headline only — never read out long messages,
+errors, logs, or status; those stay on screen.
+
+**How:** guard with `command -v vox` (silent no-op if absent); fire-and-return,
+no `--wait`. Example:
+`command -v vox >/dev/null && vox "The web build finished — 2 tests failed."`
