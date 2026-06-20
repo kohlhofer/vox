@@ -137,3 +137,9 @@ Then register it (stdio transport), e.g. in `claude_desktop_config.json`:
 - `SPEAK_SAY_VOICE=Daniel vox --engine say "…"` picks a system voice for the
   fallback path.
 - Runtime state (socket, log) lives under `~/.cache/vox/`.
+
+## License
+
+[MIT](LICENSE) © Alexander Kohlhofer. The Kokoro-82M model and its voices are
+distributed under their own licenses — see
+[hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M).
