@@ -1,0 +1,11 @@
+# Runtime deps for the Kokoro voice path (Apple Silicon, Python 3.13).
+# Without these, speak still works via the macOS `say` fallback — just lower
+# quality. With them, you get Kokoro-82M neural voices.
+
+mlx-audio        # Kokoro-82M text-to-speech in MLX
+misaki           # text -> phonemes for Kokoro
+num2words        # spoken numbers ("42" -> "forty-two")
+spacy            # tokenizer misaki depends on
+phonemizer       # phoneme backend
+espeakng-loader  # bundles the espeak-ng binary (no `brew install` needed)
+numpy            # array handling + wav encoding
