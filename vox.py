@@ -21,6 +21,7 @@ import atexit
 import fcntl
 import json
 import os
+import re
 import socket
 import socketserver
 import subprocess
@@ -29,7 +30,7 @@ import tempfile
 import threading
 import time
 import wave
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 
 # --------------------------------------------------------------------------- #
 # Configuration                                                               #
@@ -85,26 +86,42 @@ class Engine:
     to load we remember that and use `say` for the rest of the process.
     """
 
+    # mlx-audio silently truncates Kokoro output past ~13.8s (its ~510-token
+    # limit), so we synthesize a sentence or so at a time and keep each piece
+    # well under that — ~180 chars leaves comfortable margin.
+    MAX_CHUNK_CHARS = 180
+
     def __init__(self, engine: str = "auto", quiet: bool = False):
         self.mode = engine
         self.quiet = quiet
         self._tts = None
         self._np = None
-        self._kokoro_broken = (engine == "say")
+        self._kokoro_broken = (engine == "say")   # only a *load* failure latches this
         self._play_lock = threading.Lock()
         self._current: subprocess.Popen | None = None
+        self._interrupt = threading.Event()
 
     # -- Kokoro loading ----------------------------------------------------- #
 
-    def _load_kokoro(self):
+    def _ensure_loaded(self) -> bool:
+        """Load Kokoro once; return True if it's usable. A load failure latches
+        the fallback (no point retrying a broken install every call). A failure
+        to synthesize one piece of text does NOT — that's handled per chunk."""
         if self._tts is not None:
-            return self._tts
-        _eprint("vox: warming up the voice (first run downloads ~160MB)…", self.quiet)
-        import numpy as np                                  # noqa: WPS433
-        from mlx_audio.tts.utils import load_model           # noqa: WPS433
-        self._np = np
-        self._tts = load_model(KOKORO_REPO)
-        return self._tts
+            return True
+        if self._kokoro_broken:
+            return False
+        try:
+            _eprint("vox: warming up the voice (first run downloads ~160MB)…", self.quiet)
+            import numpy as np                              # noqa: WPS433
+            from mlx_audio.tts.utils import load_model       # noqa: WPS433
+            self._np = np
+            self._tts = load_model(KOKORO_REPO)
+            return True
+        except Exception as exc:                              # noqa: BLE001
+            self._kokoro_broken = True
+            _eprint(f"vox: neural voice unavailable ({exc}); using the system voice.", self.quiet)
+            return False
 
     @property
     def name(self) -> str:
@@ -114,19 +131,70 @@ class Engine:
             return "say"
         return "kokoro?" if self.mode != "say" else "say"
 
+    # -- Text chunking ------------------------------------------------------ #
+
+    @classmethod
+    def _chunk_text(cls, text: str):
+        """Break text into synthesis-sized pieces. Split on sentence boundaries
+        first so seams fall at natural pauses; sub-split any over-long sentence
+        on clause punctuation, then hard-wrap on spaces as a last resort."""
+        text = " ".join(text.split())
+        cap = cls.MAX_CHUNK_CHARS
+        out = []
+        for sent in re.split(r"(?<=[.!?…])\s+", text):
+            if not sent:
+                continue
+            if len(sent) <= cap:
+                out.append(sent)
+                continue
+            buf = ""
+            for clause in re.split(r"(?<=[;:,—–])\s+", sent):
+                while len(clause) > cap:                     # clause itself too long
+                    cut = clause.rfind(" ", 0, cap)
+                    cut = cut if cut > 0 else cap
+                    out.append(clause[:cut].strip())
+                    clause = clause[cut:].strip()
+                if not buf:
+                    buf = clause
+                elif len(buf) + 1 + len(clause) <= cap:
+                    buf += " " + clause
+                else:
+                    out.append(buf)
+                    buf = clause
+            if buf:
+                out.append(buf)
+        return [c for c in out if c]
+
     # -- Synthesis ---------------------------------------------------------- #
 
-    def _synth_kokoro(self, text: str, voice: str, speed: float):
-        """Kokoro -> (float32 mono samples, sample_rate). generate() yields one
-        result per newline-split segment; concatenate to be safe."""
-        tts = self._load_kokoro()
+    # mlx-audio's Kokoro vocoder has a content-dependent off-by-one-frame bug:
+    # for certain phoneme->duration alignments an internal op raises a broadcast
+    # error. A small change in tempo shifts the alignment and dodges it, so on
+    # that specific failure we retry at nearby speeds before giving up a chunk.
+    _SPEED_NUDGES = (1.0, 1.07, 0.93, 1.15, 0.86, 1.22)
+
+    def _synth_once(self, text: str, voice: str, speed: float):
+        """One Kokoro pass -> (float32 mono samples, sample_rate)."""
         np = self._np
-        chunks, sr = [], 24_000
-        for r in tts.generate(text=text, voice=voice, speed=speed, lang_code="a"):
-            chunks.append(np.asarray(r.audio, dtype=np.float32))
+        parts, sr = [], 24_000
+        for r in self._tts.generate(text=text, voice=voice, speed=speed, lang_code="a"):
+            parts.append(np.asarray(r.audio, dtype=np.float32))
             sr = r.sample_rate
-        audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
         return audio, sr
+
+    def _synth_kokoro(self, text: str, voice: str, speed: float):
+        """Synthesize a chunk, retrying at nearby tempos to dodge the alignment
+        bug. Raises only if every attempt fails (then the caller uses `say`)."""
+        last = None
+        for mult in self._SPEED_NUDGES:
+            try:
+                return self._synth_once(text, voice, clamp_speed(speed * mult))
+            except Exception as exc:                          # noqa: BLE001
+                if "broadcast" not in str(exc).lower():
+                    raise                                     # unrelated failure
+                last = exc
+        raise last
 
     # -- Playback ----------------------------------------------------------- #
 
@@ -177,7 +245,9 @@ class Engine:
                     self._current = None
 
     def stop_current(self) -> None:
-        """Interrupt whatever is playing right now (no-op if silent)."""
+        """Interrupt speech right now: signal any in-flight speak() to bail and
+        kill the playing process (no-op if silent)."""
+        self._interrupt.set()
         with self._play_lock:
             if self._current and self._current.poll() is None:
                 self._current.terminate()
@@ -185,30 +255,84 @@ class Engine:
     # -- Public ------------------------------------------------------------- #
 
     def speak(self, text: str, voice: str, speed: float) -> None:
-        """Synthesize and play `text`, blocking until playback finishes.
-
-        Fail-closed on attention: if Kokoro errors for any reason, fall through
-        to `say` so the user still hears something.
+        """Speak `text`, blocking until it finishes. Long text is chunked and
+        synthesized one piece ahead while the previous piece plays, so there's
+        no long pause between sentences. A chunk that Kokoro can't synthesize
+        falls back to `say` for that chunk only — it never poisons the rest.
         """
         text = text.strip()
         if not text:
             return
         speed = clamp_speed(speed)
-        if self.mode != "say" and not self._kokoro_broken:
-            wav = None
-            try:
-                samples, sr = self._synth_kokoro(text, voice, speed)
-                if samples.size:
-                    wav = self._write_wav(samples, sr)
-                    self._afplay(wav)
+        self._interrupt.clear()
+        chunks = self._chunk_text(text)
+        use_kokoro = self.mode != "say" and self._ensure_loaded()
+
+        if not use_kokoro:
+            for chunk in chunks:
+                if self._interrupt.is_set():
                     return
-            except Exception as exc:                          # noqa: BLE001
-                self._kokoro_broken = True
-                _eprint(f"vox: voice engine unavailable ({exc}); using system voice.", self.quiet)
-            finally:
-                if wav and os.path.exists(wav):
-                    os.remove(wav)
-        self._say(text, speed)
+                self._say(chunk, speed)
+            return
+
+        # Pipeline: a producer thread synthesizes ahead into a small bounded
+        # queue (so we never run far ahead of playback or block on interrupt)
+        # while this thread plays each piece in order.
+        ready: "Queue[tuple[str, str]]" = Queue(maxsize=2)
+
+        def producer():
+            for chunk in chunks:
+                if self._interrupt.is_set():
+                    break
+                item = None
+                try:
+                    samples, sr = self._synth_kokoro(chunk, voice, speed)
+                    if samples.size:
+                        item = ("wav", self._write_wav(samples, sr))
+                except Exception as exc:                      # noqa: BLE001
+                    _eprint(f"vox: system voice for one part ({exc}).", self.quiet)
+                if item is None:
+                    item = ("say", chunk)
+                # put with timeout so an interrupt can't deadlock us on a full queue
+                while not self._interrupt.is_set():
+                    try:
+                        ready.put(item, timeout=0.2)
+                        break
+                    except Full:
+                        continue
+                else:
+                    if item[0] == "wav":
+                        _safe_unlink(item[1])
+                    break
+            ready.put(("end", ""))
+
+        threading.Thread(target=producer, daemon=True).start()
+        try:
+            while not self._interrupt.is_set():
+                kind, payload = ready.get()
+                if kind == "end":
+                    break
+                if kind == "wav":
+                    try:
+                        self._afplay(payload)
+                    finally:
+                        _safe_unlink(payload)
+                else:
+                    self._say(payload, speed)
+        finally:
+            self._drain_ready(ready)
+
+    @staticmethod
+    def _drain_ready(ready: "Queue[tuple[str, str]]") -> None:
+        """On interrupt, empty the queue and delete any pre-synthesized wavs so
+        the producer unblocks and no temp files leak."""
+        while True:
+            try:
+                kind, payload = ready.get_nowait()
+            except Empty:
+                return
+            if kind == "wav":
+                _safe_unlink(payload)
 
 
 # --------------------------------------------------------------------------- #
