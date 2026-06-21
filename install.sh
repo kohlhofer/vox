@@ -19,6 +19,20 @@ echo "==> Installing dependencies (this downloads a fair bit the first time)"
 ./.venv/bin/python -m pip install --quiet --upgrade pip
 ./.venv/bin/python -m pip install --quiet -r requirements.txt
 
+# espeak-ng lets Kokoro phonemize out-of-dictionary words (odd names,
+# abbreviations). Without it those words get skipped or fall back to the
+# lower-quality macOS `say` voice. Install it via Homebrew when available;
+# it's a nice-to-have, so never fail the install over it.
+if command -v espeak-ng >/dev/null 2>&1; then
+  echo "==> espeak-ng already installed"
+elif command -v brew >/dev/null 2>&1; then
+  echo "==> Installing espeak-ng (for out-of-dictionary words)"
+  brew install espeak-ng || echo "    NOTE: espeak-ng install failed; vox still works, odd words may use the system voice."
+else
+  echo "    NOTE: espeak-ng not found and Homebrew unavailable. vox works without it,"
+  echo "          but unusual words may fall back to the macOS 'say' voice."
+fi
+
 # Launcher: a 2-line shim that execs the venv python against vox.py.
 BIN_DIR="${VOX_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN_DIR"

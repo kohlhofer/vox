@@ -43,8 +43,10 @@ git clone <this repo> vox && cd vox
 ./install.sh
 ```
 
-That builds a Python venv, installs the Kokoro deps, and drops a `vox` launcher
-in `~/.local/bin`. If that's not on your PATH, the script tells you. Set
+That builds a Python venv, installs the Kokoro deps, installs `espeak-ng` via
+Homebrew (so Kokoro can pronounce out-of-dictionary words instead of skipping
+them or dropping to the macOS `say` voice), and drops a `vox` launcher in
+`~/.local/bin`. If that's not on your PATH, the script tells you. Set
 `VOX_BIN_DIR=/usr/local/bin ./install.sh` to put the launcher elsewhere.
 
 First run downloads the model (~160MB) and is slow. After that it's fast.
