@@ -1,21 +1,33 @@
 ---
 name: vox-voice-alerts
-description: Speak a short spoken alert to the user via the `vox` text-to-speech CLI when a long-running task finishes, when you need their input/decision/approval, or when something broke — so they hear it even if they're not watching the terminal. Use instead of silently printing "done" or "I need input" when the user may be away. Requires `vox` on PATH; no-op if it isn't installed.
+description: Speak a short spoken alert to the user via the `vox` text-to-speech CLI whenever you hand the turn back to them — a task finished (pass or fail, however long it took), you're blocked and need input/a decision/approval, something broke, or you're about to go quiet on a long job. Assume the user is NOT watching the terminal, so speaking is the default and silence the exception. Use instead of silently printing "done" or "I need input". Requires `vox` on PATH; no-op if it isn't installed.
 ---
 
 # Voice alerts with vox
 
-`vox` reads text aloud on the user's Mac. Use it as a tap on the shoulder when
-something needs their attention and they may not be looking at the terminal.
+`vox` reads text aloud on the user's Mac. **Assume the user is not looking at the
+terminal while you work** — `vox` is how you reach them, so use it freely.
+Default to speaking; silence is the exception, not the rule.
 
-## Speak — and basically only — when
+## Speak every time you hand the turn back
 
-- A long-running task the user is waiting on **finishes** (passed or failed).
-- You're **blocked** and need their input, a decision, or approval to continue.
-- Something **broke** that they'd want to know about now rather than later.
+That's the moment the user needs to know to look:
 
-Stay silent for routine progress, ordinary end-of-turn replies, and anything
-they're already watching. Err toward silence — overusing it makes it noise.
+- You **finished** — pass or fail, however long it took. A two-minute task
+  finishing still earns a tap on the shoulder; don't wait for "long-running."
+- You're **blocked** or waiting on them — input, a decision, approval, a
+  clarification.
+- Something **broke**, or you found something they'd want to know now.
+- You're about to **go quiet** for a while (a build, a deploy, a long job) — say
+  so, then tell them again when it's back.
+
+In short: if your turn is ending and they might not be watching, say one line
+out loud — anywhere from a plain "done" to "here's what I need from you."
+
+**Still stay silent for:** step-by-step narration mid-task (one note when the
+turn ends, not five along the way) and quick conversational back-and-forth where
+they just spoke to you and are obviously right there. One note per turn — if two
+things matter, combine them into one sentence rather than firing twice.
 
 ## What to say — one short, conversational sentence (~6–14 words)
 
@@ -29,6 +41,7 @@ Good:
 - `vox "The web build finished — all tests green."`
 - `vox "Heads up — the staging migration failed, want me to retry?"`
 - `vox "I need your call on the auth approach before I continue."`
+- `vox "Starting the deploy — I'll tell you when it's live."`
 
 Too much: reading a full error trace, a paragraph of summary, or every step.
 

@@ -3,9 +3,10 @@
 Drop-in pieces so a coding agent will speak up through `vox` when a long job
 finishes or it needs your input — instead of you having to watch the terminal.
 
-The behavioral guidance is the same everywhere (speak only when something needs
-attention; one short sentence; lead with which job it's about; headline only,
-never read out long output). Only the file format differs per tool.
+The behavioral guidance is the same everywhere (assume the user isn't watching
+the terminal, so speak up whenever you hand the turn back — done, blocked, broke,
+or about to go quiet; one short sentence; lead with which job it's about;
+headline only, never read out long output). Only the file format differs per tool.
 
 > Prerequisite: install vox first (see the [main README](../README.md)) so the
 > `vox` command is on your PATH. Every integration guards on `command -v vox`,

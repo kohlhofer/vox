@@ -107,9 +107,10 @@ Any agent that can run a shell command can use it:
 vox "I've finished the refactor and I need you to review it."
 ```
 
-For ready-made drop-ins that teach an agent *when* to speak up (a long job
-finished, it needs your input) — a Claude Code skill, a `CLAUDE.md` snippet, and
-an `AGENTS.md` block for Codex and other tools — see [`integrations/`](integrations/).
+For ready-made drop-ins that teach an agent *when* to speak up (it finished a
+task, it's blocked on you, something broke) — a Claude Code skill, a `CLAUDE.md`
+snippet, and an `AGENTS.md` block for Codex and other tools — see
+[`integrations/`](integrations/).
 
 For MCP-native agents there's an optional server (`vox_mcp.py`) exposing
 `speak_text`, `stop`, and `list_voices` tools over the same engine:

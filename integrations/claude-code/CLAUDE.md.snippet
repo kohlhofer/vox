@@ -2,17 +2,21 @@
 # A skill is loaded only when the model judges it relevant; this snippet is
 # always in context, so it fires more reliably for proactive "alert me" behavior.
 
-## Voice alerts — speak up with `vox` when I need to act
+## Voice alerts — assume I'm not watching; reach me with `vox`
 
-When something needs my attention and I might not be watching the terminal, say
-it out loud with `vox` (a local text-to-speech CLI; https://github.com/kohlhofer/vox).
-I often have several long jobs going at once, so the note has to tell me *which*
-one without making me come look.
+Assume I am **not** looking at the terminal while you work. `vox` (a local
+text-to-speech CLI; https://github.com/kohlhofer/vox) is how you get my
+attention, so use it freely — **default to speaking; silence is the exception.**
+I often have several jobs going, so lead with *which* one.
 
-**Speak — and basically only — when:** a long task I'm waiting on finishes
-(passed or failed); you're blocked and need my input/decision/approval;
-something broke I'd want to know about now. Stay silent for routine progress,
-ordinary replies, and anything I'm already watching.
+**Speak every time you hand the turn back to me:** I finished a task (pass or
+fail, however long it took — don't wait for a job to be "long-running"); you're
+blocked and need my input/decision/approval; something broke; or you're about to
+go quiet on a build/deploy/long job (say so, then tell me again when it's back).
+
+**Still stay silent for:** step-by-step narration mid-task (one note when the
+turn ends, not five along the way) and quick conversational back-and-forth where
+I just spoke to you and am obviously right here. One note per turn.
 
 **What to say:** one short, conversational sentence (~6–14 words). Lead with the
 concern (project/repo/process) so I can tell it apart from my other jobs; say
