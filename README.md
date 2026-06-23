@@ -1,42 +1,28 @@
 # vox
 
-Read text out loud with a good neural voice, from anywhere on your Mac.
+`vox` is how your AI coding agent gets your attention: it says one short line out
+loud when a job finishes, when it's blocked on you, or when something broke — so
+you can stop babysitting the terminal and look back only when there's a reason to.
 
 ```sh
-vox "Build finished — all green."
-vox -v am_onyx -s 0.95 "Heads up, I need your input on the migration."
-vox notes.md        # read a file aloud (Markdown is stripped)
-echo "piped text works too" | vox
-vox --stop          # cut off whatever is talking
+command -v vox >/dev/null && vox "The web build finished — 2 tests failed."
 ```
 
-It exists so an AI agent (or any script) can get your attention or give you a
-spoken update — something you should *hear*, not read off a screen.
+That one guarded line is the whole pattern. Any agent that can run a shell
+command can call `vox`, and the `command -v` guard makes it a clean no-op on
+machines where vox isn't installed. The voice is a good neural one
+([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)), so it's pleasant to leave
+running in the background while you work on something else.
 
-## How it sounds
+It's also a plain text-to-speech CLI — pipe it text, point it at a file — but
+voice alerts for agents are what it's for, and the rest of this README is built
+around that.
 
-Voices come from [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) running
-through [mlx-audio](https://github.com/Blaizzy/mlx-audio) on Apple Silicon. The
-default is `af_bella`. If Kokoro can't load (Intel Mac, missing deps, whatever),
-it falls back to the built-in macOS `say` voice — lower quality, but it never
-goes silent.
+## Set it up for your agent
 
-```sh
-vox --list-voices
-```
+Two steps: install vox, then teach your agent *when* to speak.
 
-| voice | |
-|---|---|
-| `af_bella` | female, American, expressive — **default** |
-| `af_heart` | female, American, warm |
-| `af_nicole` | female, American, soft |
-| `af_sky` | female, American, bright |
-| `am_michael` | male, American |
-| `am_adam` | male, American |
-| `am_onyx` | male, American, deep |
-| `am_puck` | male, American, playful |
-
-## Install
+### 1. Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/kohlhofer/vox/main/bootstrap.sh | bash
@@ -60,6 +46,60 @@ Put the launcher somewhere other than `~/.local/bin` with `VOX_BIN_DIR=/usr/loca
 
 First run downloads the model (~160MB) and is slow. After that it's fast.
 
+### 2. Tell your agent when to speak
+
+The command alone isn't enough — the agent needs a rule for *when* a spoken note
+is worth it, or it either stays silent or talks over every step. The
+[`integrations/`](integrations/) directory has ready-to-paste guidance that
+encodes that rule (speak whenever you hand the turn back — done, blocked, broke,
+or about to go quiet; one short sentence; lead with which job; headline only,
+never read out logs). The behavior is the same everywhere; only the file format
+differs.
+
+**Claude Code** is the setup I use. Paste the body of
+[`claude-code/CLAUDE.md.snippet`](integrations/claude-code/CLAUDE.md.snippet)
+into your global `~/.claude/CLAUDE.md` (or a project `CLAUDE.md`). Putting it in
+`CLAUDE.md` keeps it always in context, which fires far more reliably for
+proactive "alert me" behavior than a skill that only loads when the model thinks
+it's relevant. There's also a [skill](integrations/claude-code/skills/vox/) if
+you'd rather install it that way:
+
+```sh
+ln -s "$PWD/integrations/claude-code/skills/vox" ~/.claude/skills/vox
+```
+
+**Codex and other AGENTS.md tools** — paste the `## Voice alerts with vox`
+section from [`integrations/AGENTS.md`](integrations/AGENTS.md) into your repo or
+`~/.codex/AGENTS.md`.
+
+**Cursor / Zed / Gemini CLI / others** — the same text works; drop it into
+whichever rules file your tool reads (`.cursor/rules/*.mdc`, `GEMINI.md`, etc.).
+
+Then ask your agent to "run a quick task and tell me out loud when it's done."
+You should hear one short spoken note.
+
+## Voices
+
+The default is `af_bella`. If Kokoro can't load (Intel Mac, missing deps,
+whatever), vox falls back to the built-in macOS `say` voice — lower quality, but
+it never goes silent on you.
+
+```sh
+vox --list-voices
+vox -v am_onyx -s 0.95 "Heads up, I need your input on the migration."
+```
+
+| voice | |
+|---|---|
+| `af_bella` | female, American, expressive — **default** |
+| `af_heart` | female, American, warm |
+| `af_nicole` | female, American, soft |
+| `af_sky` | female, American, bright |
+| `am_michael` | male, American |
+| `am_adam` | male, American |
+| `am_onyx` | male, American, deep |
+| `am_puck` | male, American, playful |
+
 ## Why it's fast (the daemon)
 
 The first `vox` call starts a small background daemon that keeps the voice model
@@ -82,6 +122,7 @@ headings, list markers, links, emphasis) so it doesn't narrate `#` and URLs:
 ```sh
 vox README.md
 vox -f ~/notes/standup.md
+echo "piped text works too" | vox
 ```
 
 Long text is split into sentence-sized pieces and synthesized one ahead of
@@ -108,18 +149,7 @@ By default `vox` returns as soon as the text is queued, so an agent can say
 "I need your input" and immediately go back to waiting for you. Use `--wait`
 when you need the call to block until the words have actually been spoken.
 
-## Using it from an AI agent
-
-Any agent that can run a shell command can use it:
-
-```sh
-vox "I've finished the refactor and I need you to review it."
-```
-
-For ready-made drop-ins that teach an agent *when* to speak up (it finished a
-task, it's blocked on you, something broke) — a Claude Code skill, a `CLAUDE.md`
-snippet, and an `AGENTS.md` block for Codex and other tools — see
-[`integrations/`](integrations/).
+## MCP server
 
 For MCP-native agents there's an optional server (`vox_mcp.py`) exposing
 `speak_text`, `stop`, and `list_voices` tools over the same engine:
