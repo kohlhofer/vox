@@ -39,15 +39,24 @@ vox --list-voices
 ## Install
 
 ```sh
-git clone <this repo> vox && cd vox
+curl -fsSL https://raw.githubusercontent.com/kohlhofer/vox/main/bootstrap.sh | bash
+```
+
+That clones vox into `~/.local/share/vox`, builds a Python venv, installs the
+Kokoro deps, installs `espeak-ng` via Homebrew (so Kokoro can pronounce
+out-of-dictionary words instead of skipping them or dropping to the macOS `say`
+voice), and drops a `vox` launcher in `~/.local/bin`. If that's not on your PATH,
+the script tells you. Re-run the same command anytime to update to the latest.
+
+Rather inspect things first, or already have a clone? Install from source:
+
+```sh
+git clone https://github.com/kohlhofer/vox.git && cd vox
 ./install.sh
 ```
 
-That builds a Python venv, installs the Kokoro deps, installs `espeak-ng` via
-Homebrew (so Kokoro can pronounce out-of-dictionary words instead of skipping
-them or dropping to the macOS `say` voice), and drops a `vox` launcher in
-`~/.local/bin`. If that's not on your PATH, the script tells you. Set
-`VOX_BIN_DIR=/usr/local/bin ./install.sh` to put the launcher elsewhere.
+Put the launcher somewhere other than `~/.local/bin` with `VOX_BIN_DIR=/usr/local/bin`
+(works with either path); change the checkout location with `VOX_HOME`.
 
 First run downloads the model (~160MB) and is slow. After that it's fast.
 
