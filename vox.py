@@ -74,6 +74,31 @@ def clamp_speed(s: float) -> float:
     return max(SPEED_MIN, min(SPEED_MAX, s))
 
 
+def _configure_espeak() -> None:
+    """Point Kokoro's phonemizer at the espeak-ng bundled by `espeakng-loader`.
+
+    Kokoro (via misaki → phonemizer) needs an espeak-ng library to pronounce
+    out-of-dictionary words — names, abbreviations. Without it those words are
+    skipped and the segment drops to the macOS `say` voice. When Homebrew's
+    espeak-ng isn't installed (it usually isn't), the `espeakng-loader` wheel
+    ships the library and its data; we just have to tell phonemizer where they
+    are. Idempotent, and a total no-op if anything's missing so a broken espeak
+    never blocks the neural voice from loading."""
+    if os.environ.get("PHONEMIZER_ESPEAK_LIBRARY") and os.environ.get("ESPEAK_DATA_PATH"):
+        return
+    try:
+        import espeakng_loader                              # noqa: WPS433
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper  # noqa: WPS433
+
+        lib = espeakng_loader.get_library_path()
+        data = espeakng_loader.get_data_path()
+        os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY", lib)
+        os.environ.setdefault("ESPEAK_DATA_PATH", data)      # espeak-ng reads this
+        EspeakWrapper.set_library(lib)
+    except Exception:                                        # noqa: BLE001
+        pass                                                 # names may drop to `say`; not fatal
+
+
 # --------------------------------------------------------------------------- #
 # Engine: synthesis + playback                                                #
 # --------------------------------------------------------------------------- #
@@ -113,6 +138,7 @@ class Engine:
             return False
         try:
             _eprint("vox: warming up the voice (first run downloads ~160MB)…", self.quiet)
+            _configure_espeak()                              # OOD words (names) need espeak
             import numpy as np                              # noqa: WPS433
             from mlx_audio.tts.utils import load_model       # noqa: WPS433
             self._np = np
