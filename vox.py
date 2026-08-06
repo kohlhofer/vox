@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import socket
 import socketserver
 import subprocess
@@ -62,6 +63,7 @@ _RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache/vox
 SOCK_PATH = os.path.join(_RUNTIME, "vox.sock")
 LOCK_PATH = os.path.join(_RUNTIME, "vox.lock")
 LOG_PATH = os.path.join(_RUNTIME, "daemon.log")
+PID_PATH = os.path.join(_RUNTIME, "vox.pid")   # live daemon's pid; used to reap a wedged one
 
 
 def _eprint(msg: str, quiet: bool = False) -> None:
@@ -414,6 +416,7 @@ class Daemon:
             idle = time.monotonic() - self.last_active
             if idle > IDLE_TIMEOUT and self.jobs.empty() and self.engine._current is None:
                 _safe_unlink(SOCK_PATH)     # os._exit skips atexit; clean up first
+                _safe_unlink(PID_PATH)
                 os._exit(0)
 
     # -- Request handling --------------------------------------------------- #
@@ -493,7 +496,9 @@ def run_daemon(engine: str = "auto") -> int:
         server = _Server(SOCK_PATH, _Handler)
         server.app = Daemon(engine=engine)  # type: ignore[attr-defined]
         server.app.server = server          # so a `quit` request can shut us down
-        atexit.register(lambda: _safe_unlink(SOCK_PATH))
+        with open(PID_PATH, "w") as f:      # record pid so a client can reap us if we wedge
+            f.write(str(os.getpid()))
+        atexit.register(lambda: (_safe_unlink(SOCK_PATH), _safe_unlink(PID_PATH)))
         try:
             server.serve_forever(poll_interval=0.5)   # keeps --quit responsive
         except KeyboardInterrupt:
@@ -501,6 +506,7 @@ def run_daemon(engine: str = "auto") -> int:
         finally:
             server.server_close()
             _safe_unlink(SOCK_PATH)
+            _safe_unlink(PID_PATH)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -540,6 +546,28 @@ def _ping() -> dict | None:
     return _request({"cmd": "ping"}, timeout=2.0)
 
 
+def _reap_stale() -> None:
+    """Clear a daemon that is present but not serving. A clean exit leaves nothing
+    behind, but a *wedged* daemon (alive yet hung) or a socket orphaned by a hard
+    crash/reboot makes every client stall on connect — and the respawn stands down
+    on the still-held lock. Call this only after a failed ping: if the socket is
+    gone there's nothing to do; otherwise SIGTERM the recorded pid (releasing its
+    flock) and drop the socket so the next spawn binds cleanly."""
+    if not os.path.exists(SOCK_PATH):
+        return
+    try:
+        with open(PID_PATH) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(20):                 # up to ~2s for a graceful exit
+            time.sleep(0.1)
+            os.kill(pid, 0)                 # raises ProcessLookupError once it's gone
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        pass
+    _safe_unlink(SOCK_PATH)
+    _safe_unlink(PID_PATH)
+
+
 def _spawn_daemon(engine: str, quiet: bool) -> bool:
     """Start the daemon detached and wait until it answers a ping."""
     os.makedirs(_RUNTIME, exist_ok=True)
@@ -562,8 +590,10 @@ def _spawn_daemon(engine: str, quiet: bool) -> bool:
 
 
 def speak_via_daemon(text, voice, speed, wait, engine, quiet) -> bool:
-    if _ping() is None and not _spawn_daemon(engine, quiet):
-        return False
+    if _ping() is None:
+        _reap_stale()                       # a wedged/orphaned daemon would stall the respawn
+        if not _spawn_daemon(engine, quiet):
+            return False
     # On --wait the socket stays open until playback finishes; give it lots of
     # headroom so we never time out mid-sentence and re-speak inline.
     timeout = 600.0 if wait else 10.0
