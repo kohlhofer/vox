@@ -15,6 +15,11 @@ Changes made for vox (all marked `vox:` in the source):
   downloads the weights into whatever directory it is given instead of only the repo
   default. Imports are package-relative.
 - `text_normalization_pipeline.py`: package-relative import.
+- `onnx_tts_runtime.py`: weight downloads are pinned to fixed revisions
+  (`DEFAULT_BROWSER_ONNX_*_REVISION`) instead of floating on the repos' default
+  branch — MOSS-TTS-Nano-100M-ONNX `f52645cb467506d8e18e746ddd59482685b74e58`,
+  MOSS-Audio-Tokenizer-Nano-ONNX `ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae`
+  (both 2026-04-17, current when vendored).
 
 The model weights are not vendored; they are downloaded from Hugging Face on first use
 (`OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX`, `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX`,

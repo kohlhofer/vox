@@ -36,6 +36,10 @@ DEFAULT_BROWSER_ONNX_TTS_REPO_ID = "OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX"
 DEFAULT_BROWSER_ONNX_CODEC_REPO_ID = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
 DEFAULT_BROWSER_ONNX_TTS_REPO_URL = f"https://huggingface.co/{DEFAULT_BROWSER_ONNX_TTS_REPO_ID}"
 DEFAULT_BROWSER_ONNX_CODEC_REPO_URL = f"https://huggingface.co/{DEFAULT_BROWSER_ONNX_CODEC_REPO_ID}"
+# vox: pin the downloaded weights — the vendored code is fixed to a commit, so the
+# weights it runs are too. Revisions recorded in NOTICE.md; bump deliberately.
+DEFAULT_BROWSER_ONNX_TTS_REVISION = "f52645cb467506d8e18e746ddd59482685b74e58"
+DEFAULT_BROWSER_ONNX_CODEC_REVISION = "ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae"
 DEFAULT_BROWSER_ONNX_OUTPUT_PATH = DEFAULT_OUTPUT_DIR / "infer_onnx_output.wav"
 DEFAULT_VOICE_CLONE_INTER_CHUNK_PAUSE_SHORT_SECONDS = 0.40
 DEFAULT_VOICE_CLONE_INTER_CHUNK_PAUSE_LONG_SECONDS = 0.24
@@ -111,6 +115,7 @@ def _snapshot_download_repo(
     repo_id: str,
     local_dir: Path,
     allow_patterns: Sequence[str],
+    revision: str | None = None,  # vox: pin weights to a fixed revision
 ) -> None:
     try:
         from huggingface_hub import snapshot_download
@@ -121,6 +126,7 @@ def _snapshot_download_repo(
     local_dir.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=repo_id,
+        revision=revision,  # vox: pinned; None keeps upstream's floating default
         local_dir=str(local_dir),
         local_dir_use_symlinks=False,
         allow_patterns=list(allow_patterns),
@@ -135,11 +141,13 @@ def _download_default_browser_onnx_assets(model_dir: Path) -> None:
     codec_dir = model_dir / DEFAULT_BROWSER_ONNX_CODEC_DIR.name
     _snapshot_download_repo(
         repo_id=DEFAULT_BROWSER_ONNX_TTS_REPO_ID,
+        revision=DEFAULT_BROWSER_ONNX_TTS_REVISION,  # vox: pinned
         local_dir=tts_dir,
         allow_patterns=("*.onnx", "*.data", "*.json", "tokenizer.model"),
     )
     _snapshot_download_repo(
         repo_id=DEFAULT_BROWSER_ONNX_CODEC_REPO_ID,
+        revision=DEFAULT_BROWSER_ONNX_CODEC_REVISION,  # vox: pinned
         local_dir=codec_dir,
         allow_patterns=("*.onnx", "*.data", "*.json"),
     )
