@@ -37,13 +37,24 @@ fi
 BIN_DIR="${VOX_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN_DIR"
 LAUNCHER="$BIN_DIR/vox"
-cat > "$LAUNCHER" <<EOF
+
+# Never hijack a launcher belonging to a different checkout. Anyone keeping a
+# working copy alongside an installed one shares this single shim between them,
+# so overwriting it silently repoints `vox` at whichever tree ran install.sh
+# last. The symptom is edits that appear to do nothing, with no error explaining
+# why. Re-running from the same checkout still updates in place — the common case.
+if [ -e "$LAUNCHER" ] && [ -z "$VOX_FORCE_LAUNCHER" ] && ! grep -qF "$HERE/vox.py" "$LAUNCHER" 2>/dev/null; then
+  echo "==> Leaving $LAUNCHER alone — it runs another vox, not the one in $HERE"
+  echo "    Repoint it here:      VOX_FORCE_LAUNCHER=1 $0"
+  echo "    Or install alongside: VOX_BIN_DIR=~/bin $0"
+else
+  cat > "$LAUNCHER" <<EOF
 #!/bin/bash
 exec "$HERE/.venv/bin/python" "$HERE/vox.py" "\$@"
 EOF
-chmod +x "$LAUNCHER"
-
-echo "==> Installed launcher: $LAUNCHER"
+  chmod +x "$LAUNCHER"
+  echo "==> Installed launcher: $LAUNCHER"
+fi
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "    NOTE: $BIN_DIR is not on your PATH. Add it, e.g.:"
@@ -54,3 +65,4 @@ echo ""
 echo "Done. Try it:"
 echo "    vox \"Hello — vox is installed.\""
 echo "    vox --list-voices"
+echo "    vox --doctor            # check the install if anything looks off"
