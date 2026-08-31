@@ -1,14 +1,22 @@
 # Runtime deps for the Kokoro voice path (Apple Silicon, Python 3.13).
 # Without these, speak still works via the macOS `say` fallback — just lower
 # quality. With them, you get Kokoro-82M neural voices.
+#
+# Ranges, not exact pins: a floor at the version this was last verified against,
+# and a ceiling below the next release that is allowed to break compatibility
+# (the next minor for the 0.x projects, which have no stable API promise). That
+# keeps a fresh install resolvable across Python and platform combinations while
+# stopping an upstream major from silently breaking an existing one — this stack
+# is unusual in that a break shows up as vox going *quiet*, not as an error.
+# Bump the floors deliberately after testing; don't widen the ceilings.
 
-mlx-audio        # Kokoro-82M text-to-speech in MLX
-misaki           # text -> phonemes for Kokoro
-num2words        # spoken numbers ("42" -> "forty-two")
-spacy            # tokenizer misaki depends on
-phonemizer       # phoneme backend
-espeakng-loader  # bundles the espeak-ng binary (no `brew install` needed)
-numpy            # array handling + wav encoding
+mlx-audio>=0.4.5,<0.5        # Kokoro-82M text-to-speech in MLX
+misaki>=0.7.4,<0.8           # text -> phonemes for Kokoro
+num2words>=0.5.14,<0.6       # spoken numbers ("42" -> "forty-two")
+spacy>=3.8.14,<4             # tokenizer misaki depends on
+phonemizer>=3.3.0,<4         # phoneme backend
+espeakng-loader>=0.2.4,<0.3  # bundles the espeak-ng binary (no `brew install` needed)
+numpy>=2.5.1,<3              # array handling + wav encoding
 
 # Cloned voices (vox --add-voice) need onnxruntime, soundfile, sounddevice,
 # sentencepiece and huggingface_hub on top of these. They are installed into the
