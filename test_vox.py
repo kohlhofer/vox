@@ -4,6 +4,7 @@ routing. No Kokoro / MOSS / audio needed. Run: ./.venv/bin/python test_vox.py  (
 
 import tempfile
 import threading
+import types
 from pathlib import Path
 
 import numpy as np
@@ -109,13 +110,16 @@ def test_engine_routing():
     assert route("auto", "Ava", True) is True                # built-in preset, no --engine needed
     assert route("auto", "alex", False) is False             # unknown name: not ours
     assert route("auto", "af_bella", True) is False          # a stock id always wins in auto
-    assert route("moss", "af_bella", False) is True          # forced engine
+    assert route("clone", "af_bella", False) is True         # forced engine
+    assert route("moss", "af_bella", False) is True          # legacy alias still forces it
     assert route("kokoro", "alex", True) is False
     assert route("say", "alex", True) is False
 
 
-def test_presets_are_moss_voices_but_not_custom():
-    assert vox_moss.is_preset("Ava") and not vox_moss.is_preset("ava")
+def test_presets_match_case_insensitively_and_are_not_custom():
+    assert vox_moss.preset_name("Ava") == "Ava" == vox_moss.preset_name("ava")
+    assert vox_moss.is_preset("nathan") and vox_moss.preset_name("zed") is None
+    assert not vox_moss.is_preset("Trump")                   # deliberately off the roster
     with tempfile.TemporaryDirectory() as d:
         assert vox_moss.is_moss_voice("Ava", Path(d)) and not vox_moss.is_custom_voice("Ava", Path(d))
 
@@ -124,7 +128,7 @@ def test_speak_falls_back_to_default_voice_when_moss_fails():
     """The 'never silent' promise, end to end through Engine.speak with every
     external effect stubbed: MOSS says it couldn't, Kokoro must be asked for the
     default voice, and nothing real is synthesized or played."""
-    eng = vox.Engine(engine="moss", quiet=True)
+    eng = vox.Engine(engine="clone", quiet=True)
     eng._speak_moss = lambda text, voice, speed: False
     eng._ensure_loaded = lambda: True
     eng._np = np
@@ -186,10 +190,10 @@ def test_add_voice_rejects_reserved_and_bad_clips_without_side_effects():
         (d / "alex.wav").write_bytes(b"old-good-clip")
         src = d / "src.m4a"; src.write_bytes(b"x")
         orig = (vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child)
-        vox_moss._convert_clip = lambda source, dest: dest.write_bytes(b"short")
-        vox_moss._clip_seconds = lambda path: 1.0            # < MIN_CLIP_SECONDS
+        vox_moss._convert_clip = lambda source, dest: (dest.write_bytes(b"short"), 1.0)[1]  # < MIN
+        vox_moss._clip_seconds = lambda path: None
         vox_moss.ensure_deps = lambda **kw: True
-        vox_moss._encode_in_child = lambda wav: (_ for _ in ()).throw(AssertionError("must not encode"))
+        vox_moss._encode_in_child = lambda wav, quiet=False: (_ for _ in ()).throw(AssertionError("must not encode"))
         try:
             for name, err in (("af_bella", "stock voice"), ("alex", "at least")):
                 try:
@@ -199,20 +203,34 @@ def test_add_voice_rejects_reserved_and_bad_clips_without_side_effects():
                 else:
                     raise AssertionError(f"{name}: expected ValueError")
             assert (d / "alex.wav").read_bytes() == b"old-good-clip"     # untouched
-            assert not any(".tmp" in q.name for q in d.iterdir())
+            assert sorted(q.name for q in d.iterdir()) == ["alex.wav", "src.m4a"]  # no leftovers
         finally:
             vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child = orig
 
 
-def test_add_voice_removes_clip_when_encode_fails():
+def _stub_add_voice(convert_bytes=b"ok", secs=12.0, encode=None):
+    """Patch add_voice's collaborators; returns the originals for the finally block."""
+    orig = (vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child)
+    vox_moss._convert_clip = lambda source, dest: (dest.write_bytes(convert_bytes), secs)[1]
+    vox_moss._clip_seconds = lambda path: None
+    vox_moss.ensure_deps = lambda **kw: True
+    vox_moss._encode_in_child = encode or (lambda wav, quiet=False: None)
+    return orig
+
+
+def _restore_add_voice(orig):
+    vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child = orig
+
+
+def _boom(wav, quiet=False):
+    raise RuntimeError("encoder exploded")
+
+
+def test_add_voice_failure_leaves_no_new_voice_behind():
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         src = d / "src.m4a"; src.write_bytes(b"x")
-        orig = (vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child)
-        vox_moss._convert_clip = lambda source, dest: dest.write_bytes(b"ok")
-        vox_moss._clip_seconds = lambda path: 12.0
-        vox_moss.ensure_deps = lambda **kw: True
-        vox_moss._encode_in_child = lambda wav: (_ for _ in ()).throw(RuntimeError("encoder exploded"))
+        orig = _stub_add_voice(encode=_boom)
         try:
             try:
                 vox_moss.add_voice("alex", src, quiet=True, voices_dir=d)
@@ -221,8 +239,52 @@ def test_add_voice_removes_clip_when_encode_fails():
             else:
                 raise AssertionError("expected the encode failure to propagate")
             assert not vox_moss.is_custom_voice("alex", d)          # nothing half-installed
+            assert sorted(q.name for q in d.iterdir()) == ["src.m4a"]
         finally:
-            vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child = orig
+            _restore_add_voice(orig)
+
+
+def test_add_voice_failed_readd_keeps_the_old_voice():
+    """The data-loss case: re-adding an existing name must not destroy the working
+    voice when the new clip's encode fails."""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "alex.wav").write_bytes(b"old-good-clip")
+        (d / "alex.abc123.codes.json").write_text("[[1]]")
+        src = d / "src.m4a"; src.write_bytes(b"x")
+        orig = _stub_add_voice(convert_bytes=b"new-clip", encode=_boom)
+        try:
+            try:
+                vox_moss.add_voice("alex", src, quiet=True, voices_dir=d)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("expected the encode failure to propagate")
+            assert (d / "alex.wav").read_bytes() == b"old-good-clip"      # still the old voice
+            assert (d / "alex.abc123.codes.json").exists()                 # cache intact too
+            assert vox_moss.is_custom_voice("alex", d)
+        finally:
+            _restore_add_voice(orig)
+
+
+def test_add_voice_swaps_clip_and_cache_only_when_ready():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "alex.wav").write_bytes(b"old")
+        (d / "alex.old123.codes.json").write_text("[]")
+        src = d / "src.m4a"; src.write_bytes(b"x")
+        orig = _stub_add_voice(convert_bytes=b"new-clip",
+                               encode=lambda wav, quiet=False: vox_moss._codes_cache_path(wav).write_text("[[7]]"))
+        try:
+            dest = vox_moss.add_voice("alex", src, quiet=True, voices_dir=d)
+            assert dest.read_bytes() == b"new-clip"
+            cache = vox_moss._codes_cache_path(dest)
+            assert cache.exists() and cache.read_text() == "[[7]]"        # cache followed the swap
+            assert not (d / "alex.old123.codes.json").exists()             # stale cache gone
+            assert not any(q.name.startswith(".alex.new") for q in d.iterdir())
+            assert list(vox_moss.list_voices(d)) == ["alex"]
+        finally:
+            _restore_add_voice(orig)
 
 
 def test_parser_voice_management_flags():
@@ -230,7 +292,8 @@ def test_parser_voice_management_flags():
     a = p.parse_args(["--add-voice", "alex", "clip.m4a"])
     assert a.add_voice == ["alex", "clip.m4a"]
     assert p.parse_args(["--remove-voice", "alex"]).remove_voice == "alex"
-    assert p.parse_args(["--engine", "moss", "hi"]).engine == "moss"
+    assert p.parse_args(["--engine", "clone", "hi"]).engine == "clone"
+    assert p.parse_args(["--engine", "moss", "hi"]).engine == "clone"   # legacy alias
 
 
 def test_lazy_sessions_build_on_first_access():
@@ -250,6 +313,23 @@ def test_lazy_sessions_build_on_first_access():
         pass
     else:
         raise AssertionError("unknown session should raise KeyError")
+
+
+def test_daemon_idle_exit_needs_quiet_queue_and_no_busy_job():
+    d = vox.Daemon.__new__(vox.Daemon)                       # no threads started
+    d.engine = types.SimpleNamespace(_current=None)
+    d.jobs = vox.Queue()
+    d.busy, d.last_active = False, 0.0
+    late = vox.IDLE_TIMEOUT + 1
+    assert d._idle_exit_due(now=late) is True                # idle: may exit
+    d.busy = True
+    assert d._idle_exit_due(now=late) is False               # cloned voice mid-read: stay
+    d.busy = False
+    d.jobs.put(object())
+    assert d._idle_exit_due(now=late) is False               # work queued: stay
+    d.jobs.get()
+    d.engine._current = object()
+    assert d._idle_exit_due(now=late) is False               # afplay playing: stay
 
 
 def test_moss_unloads_only_when_idle_and_not_speaking():

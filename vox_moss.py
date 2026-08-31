@@ -5,8 +5,8 @@ Opt-in. vox never imports this module until a custom voice is added or used, so
 machines that only use the Kokoro voices see no change: no extra packages, no
 model download, no memory.
 
-    vox --add-voice alex ~/clips/me-reading-a-paragraph.m4a   # once
-    vox -v alex "The build is green."                          # from then on
+    vox --add-voice me ~/clips/me-reading-a-paragraph.m4a   # once
+    vox -v me "The build is green."                           # from then on
 
 A voice is one audio clip (10–20 s of clean speech) stored at the codec's native
 48 kHz stereo under ~/.config/vox/voices/<name>.wav, plus a small cache of the
@@ -59,9 +59,11 @@ PREBUFFER_MS = 250   # queue this much before playback starts; without it the fi
 PEAK_DBFS = -1.0     # reference clips are peak-normalized to this on add; a quiet clip clones badly
 
 # Built-in voices of the model (from its manifest at the vendored commit). Reachable with
-# `vox -v Ava` or `--engine moss -v Ava`; no clip needed. Names are case-sensitive.
+# `vox -v Ava` or `--engine clone -v Ava`; no clip needed; matched case-insensitively.
+# The manifest also ships a "Trump" preset; vox deliberately leaves real-person
+# impersonations off the roster.
 BUILTIN_PRESETS = ("Ava", "Bella", "Adam", "Nathan", "Anon", "Arisa", "Soyo", "Saki", "Mortis",
-                   "Umiri", "Mei", "Trump", "Junhao", "Zhiming", "Weiguo", "Xiaoyu", "Yuewen", "Lingyu")
+                   "Umiri", "Mei", "Junhao", "Zhiming", "Weiguo", "Xiaoyu", "Yuewen", "Lingyu")
 
 
 def _eprint(msg: str, quiet: bool = False) -> None:
@@ -96,8 +98,19 @@ def is_custom_voice(name: str, voices_dir: Path | None = None) -> bool:
     return voice_path(name, voices_dir) is not None
 
 
+def preset_name(name: str) -> str | None:
+    """The canonical built-in voice matching `name`, case-insensitively; else None."""
+    if not isinstance(name, str):
+        return None
+    low = name.lower()
+    for preset in BUILTIN_PRESETS:
+        if preset.lower() == low:
+            return preset
+    return None
+
+
 def is_preset(name: str) -> bool:
-    return name in BUILTIN_PRESETS
+    return preset_name(name) is not None
 
 
 def is_moss_voice(name: str, voices_dir: Path | None = None) -> bool:
@@ -131,10 +144,12 @@ def _peak_gain_db(ffmpeg: str, path: Path) -> float:
     return (PEAK_DBFS - float(m.group(1))) if m else 0.0
 
 
-def _convert_clip(source: Path, dest: Path) -> None:
-    """Any audio file -> 48 kHz stereo 16-bit WAV, leading/trailing silence trimmed and
-    peak-normalized (a quiet recording clones measurably worse than a loud one).
-    Needs ffmpeg for anything that isn't already a WAV at the right rate."""
+def _convert_clip(source: Path, dest: Path) -> float | None:
+    """Any audio file -> 48 kHz stereo 16-bit WAV, peak-normalized (a quiet recording
+    clones measurably worse than a loud one). With ffmpeg, leading/trailing silence is
+    also trimmed and any input format works; without it, only a WAV already at the
+    right rate is accepted, untrimmed. Returns the clip length in seconds when it is
+    computed along the way (the no-ffmpeg path); the caller falls back to ffprobe."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
         trim = ("silenceremove=start_periods=1:start_threshold=-40dB,areverse,"
@@ -147,7 +162,7 @@ def _convert_clip(source: Path, dest: Path) -> None:
             subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(dest), "-af", f"volume={gain:.2f}dB",
                             "-c:a", "pcm_s16le", str(loud)], check=True)
             os.replace(loud, dest)
-        return
+        return None
     import numpy as np  # noqa: WPS433
     import soundfile as sf  # noqa: WPS433
     data, sr = sf.read(str(source), dtype="float32", always_2d=True)
@@ -160,24 +175,34 @@ def _convert_clip(source: Path, dest: Path) -> None:
     if peak > 0:
         data = data * (10 ** (PEAK_DBFS / 20) / peak)
     sf.write(str(dest), data[:, :CHANNELS], SAMPLE_RATE, subtype="PCM_16")
+    return data.shape[0] / SAMPLE_RATE
 
 
-def _encode_in_child(wav: Path) -> None:
+def _encode_in_child(wav: Path, quiet: bool = False) -> None:
     """Encode a clip's prompt cache in a child process: the encoder peaks at 2–3 GB of
-    memory for a 16 s clip, and that dies with the child instead of staying with vox."""
-    r = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--encode", str(wav)],
-                       capture_output=True, text=True)
+    memory for a 16 s clip, and that dies with the child instead of staying with vox.
+    Unless quiet, the child's stderr passes straight through — the first run downloads
+    ~730 MB, and swallowing that progress made `--add-voice` look hung for minutes."""
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--encode", str(wav)]
+    if quiet:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            tail = "\n".join((r.stderr or r.stdout or "").strip().splitlines()[-3:])
+            raise RuntimeError(f"encoding {wav.name} failed: {tail or f'exit {r.returncode}'}")
+        return
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL)
     if r.returncode != 0:
-        tail = "\n".join((r.stderr or r.stdout or "").strip().splitlines()[-3:])
-        raise RuntimeError(f"encoding {wav.name} failed: {tail or f'exit {r.returncode}'}")
+        raise RuntimeError(f"encoding {wav.name} failed (exit {r.returncode}; details above)")
 
 
 def add_voice(name: str, source: str | os.PathLike, quiet: bool = False,
               voices_dir: Path | None = None, reserved: "set[str] | dict | None" = None) -> Path:
-    """Install a custom voice from an audio clip: convert, store, pre-encode. A failure
-    at any step leaves no half-installed voice behind; an existing voice of the same
-    name is replaced only once the new clip is fully ready. `reserved` names (the
-    stock voice ids) are refused so a clip can never shadow, or be shadowed by, one."""
+    """Install a custom voice from an audio clip: convert, validate, pre-encode, then
+    swap it in. Every step runs against a dot-prefixed temp clip, so a failure at any
+    point — bad clip, dead network mid model-download, crashed encoder — leaves an
+    existing voice of the same name exactly as it was, and no half-installed voice
+    behind. `reserved` names (the stock voice ids) are refused so a clip can never
+    shadow, or be shadowed by, one."""
     validate_name(name)
     if reserved and name in reserved:
         raise ValueError(f"'{name}' is a stock voice id; pick another name")
@@ -189,26 +214,28 @@ def add_voice(name: str, source: str | os.PathLike, quiet: bool = False,
     if not ensure_deps(quiet=quiet):
         raise RuntimeError("voice-cloning dependencies could not be installed")
     dest = d / f"{name}.wav"
-    tmp = dest.with_suffix(".tmp.wav")
+    tmp = d / f".{name}.new.wav"     # dot-prefixed: never listed, never hit by {name}.* globs
     try:
-        _convert_clip(src, tmp)
-        secs = _clip_seconds(tmp)
+        if not shutil.which("ffmpeg"):
+            _eprint("vox: no ffmpeg — clip used as-is, silence not trimmed "
+                    "(brew install ffmpeg for best results).", quiet)
+        secs = _convert_clip(src, tmp)
+        if secs is None:
+            secs = _clip_seconds(tmp)
         if secs is not None and secs < MIN_CLIP_SECONDS:
-            raise ValueError(f"clip is {secs:.1f}s after trimming silence; use at least {MIN_CLIP_SECONDS:.0f}s of speech")
+            raise ValueError(f"clip is {secs:.1f}s of speech; use at least {MIN_CLIP_SECONDS:.0f}s")
         if secs is not None and secs > MAX_CLIP_SECONDS:
             _eprint(f"vox: clip is {secs:.0f}s; 10–20 s of clean speech clones best.", quiet)
-        os.replace(tmp, dest)
+        _eprint(f"vox: encoding voice '{name}' (first time also downloads the ~730 MB model)…", quiet)
+        _encode_in_child(tmp, quiet=quiet)
+        tmp_cache = _codes_cache_path(tmp)             # everything ready — swap in
+        for old in d.glob(f"{name}.*.codes.json"):     # stale caches of the old clip
+            old.unlink()
+        os.replace(tmp, dest)                          # rename keeps size+mtime, so the
+        os.replace(tmp_cache, _codes_cache_path(dest))  # cache key carries over cleanly
     finally:
-        if tmp.exists():
-            tmp.unlink()
-    for old in d.glob(f"{name}.*.codes.json"):        # caches are keyed on size+mtime; stale ones go
-        old.unlink()
-    _eprint(f"vox: encoding voice '{name}' (first time also downloads the ~730 MB model)…", quiet)
-    try:
-        _encode_in_child(dest)
-    except Exception:
-        dest.unlink(missing_ok=True)                    # no voice that lists but can't speak
-        raise
+        for leftover in d.glob(f".{name}.new*"):
+            leftover.unlink(missing_ok=True)
     return dest
 
 
@@ -229,13 +256,11 @@ def remove_voice(name: str, voices_dir: Path | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 def deps_missing() -> list[str]:
-    missing = []
-    for module, spec in REQUIRED:
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(spec)
-    return missing
+    """Specs for packages not yet installed. Uses find_spec, not __import__ —
+    this runs in the client on every cloned-voice call, and actually importing
+    onnxruntime + friends costs ~0.25 s against a ~0.03 s spec lookup."""
+    import importlib.util  # noqa: WPS433
+    return [spec for module, spec in REQUIRED if importlib.util.find_spec(module) is None]
 
 
 def ensure_deps(quiet: bool = False, install: bool = True) -> bool:
@@ -249,6 +274,8 @@ def ensure_deps(quiet: bool = False, install: bool = True) -> bool:
     if r.returncode != 0:
         _eprint("vox: dependency install failed; see pip output above.", quiet)
         return False
+    import importlib  # noqa: WPS433
+    importlib.invalidate_caches()          # the finder must see the fresh site-packages
     return not deps_missing()
 
 
@@ -489,14 +516,15 @@ class MossEngine:
             key = str(cache)
             if key not in self._codes:
                 if not cache.exists():                      # e.g. voices copied from another machine
-                    _encode_in_child(wav)
+                    _encode_in_child(wav, quiet=self.quiet)
                 self._codes[key] = json.loads(cache.read_text())
             return self._codes[key]
-        if not is_preset(voice):
-            raise ValueError("no such cloned voice or preset")
-        key = f"preset:{voice}"
+        canon = preset_name(voice)
+        if canon is None:
+            raise ValueError("no such cloned voice or built-in voice")
+        key = f"preset:{canon}"
         if key not in self._codes:
-            self._codes[key] = self._runtime.resolve_prompt_audio_codes(voice=voice, prompt_audio_path=None)
+            self._codes[key] = self._runtime.resolve_prompt_audio_codes(voice=canon, prompt_audio_path=None)
         return self._codes[key]
 
     def stop(self) -> None:
@@ -517,6 +545,9 @@ class MossEngine:
         if not text:
             return True
         with self._lock:
+            if voice_path(voice) is None and preset_name(voice) is None:
+                _eprint(f"vox: no cloned voice or built-in voice named '{voice}'.", self.quiet)
+                return False
             if not self._ensure_loaded():
                 return False
             try:
