@@ -296,6 +296,64 @@ def test_parser_voice_management_flags():
     assert p.parse_args(["--engine", "moss", "hi"]).engine == "clone"   # legacy alias
 
 
+def test_parser_accepts_doctor():
+    p = vox.build_parser()
+    assert p.parse_args(["--doctor"]).doctor is True
+    assert p.parse_args(["hello"]).doctor is False
+
+
+def _doctor_rows(kokoro, platform, say):
+    """Only the three labels the verdict reads; other rows are informational."""
+    return [(kokoro, "kokoro deps", ""), (platform, "platform", ""), (say, "say fallback", "")]
+
+
+def test_doctor_verdict_reports_what_can_still_speak():
+    ok, warn, fail = vox.DOCTOR_OK, vox.DOCTOR_WARN, vox.DOCTOR_FAIL
+
+    code, msg = vox._doctor_verdict(_doctor_rows(ok, ok, ok))
+    assert code == 0 and "neural" in msg
+
+    # Deps fine but wrong architecture: Kokoro can't run, `say` still can.
+    code, msg = vox._doctor_verdict(_doctor_rows(ok, warn, ok))
+    assert code == 0 and "say" in msg
+
+    code, msg = vox._doctor_verdict(_doctor_rows(fail, ok, ok))
+    assert code == 0 and "say" in msg
+
+    # Nothing can talk — the only failing case, which is what makes
+    # `vox --doctor` a real probe where `command -v vox` tells you nothing.
+    code, msg = vox._doctor_verdict(_doctor_rows(fail, warn, fail))
+    assert code == 1 and "cannot" in msg
+
+
+def test_doctor_flags_a_launcher_from_another_checkout():
+    """One shim is shared between a working copy and an installed one, so
+    pointing at the wrong tree is silent. Doctor has to say so."""
+    import os
+    import shutil
+    here = os.path.dirname(os.path.abspath(vox.__file__))
+    real_which = shutil.which
+    with tempfile.TemporaryDirectory() as td:
+        foreign = Path(td) / "vox"
+        foreign.write_text('#!/bin/bash\nexec "/elsewhere/.venv/bin/python" "/elsewhere/vox.py" "$@"\n')
+        mine = Path(td) / "vox-mine"
+        mine.write_text(f'#!/bin/bash\nexec "{here}/.venv/bin/python" "{here}/vox.py" "$@"\n')
+        try:
+            shutil.which = lambda *a, **k: str(foreign)
+            status, label, detail = vox._doctor_launcher_row()
+            assert label == "launcher" and status == vox.DOCTOR_WARN
+            assert "different checkout" in detail
+
+            shutil.which = lambda *a, **k: str(mine)
+            assert vox._doctor_launcher_row()[0] == vox.DOCTOR_OK
+
+            shutil.which = lambda *a, **k: None
+            status, _, detail = vox._doctor_launcher_row()
+            assert status == vox.DOCTOR_WARN and "PATH" in detail
+        finally:
+            shutil.which = real_which
+
+
 def test_lazy_sessions_build_on_first_access():
     built = []
     class Runtime:                                            # the builder is a bound method,

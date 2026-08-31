@@ -789,6 +789,116 @@ def _print_voices() -> None:
     print("Any Mac also has the built-in `say` voices; set SPEAK_SAY_VOICE to pick one.")
 
 
+# --------------------------------------------------------------------------- #
+# Doctor                                                                      #
+# --------------------------------------------------------------------------- #
+
+# `command -v vox` — the guard the README tells agents to wrap announcements in
+# — only proves a file exists and is executable. It says nothing about whether
+# the venv behind that launcher still imports. So a half-broken install doesn't
+# announce itself; it just goes quiet, at exactly the moment the whole point was
+# to speak. --doctor is the check that actually runs things.
+
+DOCTOR_OK, DOCTOR_WARN, DOCTOR_FAIL, DOCTOR_NA = "OK", "WARN", "FAIL", "--"
+
+# Imported by the Kokoro path. Probed with find_spec rather than imported: this
+# has to stay fast enough to run before an announcement.
+KOKORO_IMPORTS = ("numpy", "mlx_audio", "misaki", "phonemizer",
+                  "espeakng_loader", "num2words")
+
+
+def _kokoro_cached() -> bool:
+    """Has the model already been downloaded? Answered by looking for the cache
+    directory, never by loading — asking whether vox is healthy must not trigger
+    a ~160 MB download as a side effect."""
+    root = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+    return os.path.isdir(os.path.join(root, "hub", "models--" + KOKORO_REPO.replace("/", "--")))
+
+
+def _doctor_launcher_row() -> tuple[str, str, str]:
+    """Does the `vox` on PATH point at this checkout? Anyone with both a working
+    copy and an installed one shares a single launcher between them, so edits
+    here can appear to do nothing while the shim runs the other tree."""
+    import shutil                                             # noqa: WPS433
+    here = os.path.dirname(os.path.abspath(__file__))
+    found = shutil.which("vox")
+    if not found:
+        return DOCTOR_WARN, "launcher", "no `vox` on PATH — is ~/.local/bin on it?"
+    try:
+        with open(found, encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+    except OSError as exc:
+        return DOCTOR_WARN, "launcher", f"{found} unreadable ({exc})"
+    if here in body:
+        return DOCTOR_OK, "launcher", f"{found} → this checkout"
+    return DOCTOR_WARN, "launcher", f"{found} → a different checkout, not {here}"
+
+
+def _doctor_rows() -> list[tuple[str, str, str]]:
+    """Probe the install. Each row is (status, label, detail)."""
+    import importlib.util                                     # noqa: WPS433
+    import platform as platform_mod                           # noqa: WPS433
+    import shutil                                             # noqa: WPS433
+
+    rows: list[tuple[str, str, str]] = []
+
+    ver = sys.version_info
+    # requirements.txt is resolved against 3.13; older interpreters pull
+    # different wheels and mlx-audio isn't proven on them.
+    rows.append((DOCTOR_OK if (ver.major, ver.minor) >= (3, 13) else DOCTOR_WARN,
+                 "python",
+                 f"{ver.major}.{ver.minor}.{ver.micro} ({sys.executable})"))
+
+    system, machine = platform_mod.system(), platform_mod.machine()
+    arch_ok = system == "Darwin" and machine == "arm64"
+    rows.append((DOCTOR_OK if arch_ok else DOCTOR_WARN, "platform",
+                 f"{system} {machine}" if arch_ok else
+                 f"{system} {machine} — the neural voice needs macOS on Apple Silicon"))
+
+    rows.append(_doctor_launcher_row())
+
+    try:
+        missing = [m for m in KOKORO_IMPORTS if importlib.util.find_spec(m) is None]
+    except Exception as exc:                                  # noqa: BLE001
+        missing = [f"<probe failed: {exc}>"]
+    rows.append((DOCTOR_OK if not missing else DOCTOR_FAIL, "kokoro deps",
+                 "all present" if not missing else
+                 f"missing {', '.join(missing)} — pip install -r requirements.txt"))
+
+    cached = _kokoro_cached()
+    rows.append((DOCTOR_OK if cached else DOCTOR_NA, "model cache",
+                 f"{KOKORO_REPO} present" if cached else
+                 f"{KOKORO_REPO} not downloaded yet (~160 MB on first speak)"))
+
+    say = shutil.which("say")
+    rows.append((DOCTOR_OK if say else DOCTOR_FAIL, "say fallback",
+                 say or "no `say` — nothing to fall back on"))
+
+    return rows
+
+
+def _doctor_verdict(rows: list[tuple[str, str, str]]) -> tuple[int, str]:
+    """Exit 0 whenever vox can speak *somehow* — the neural voice is preferred,
+    but `say` still counts as working. Exit 1 only when nothing can talk, so
+    `vox --doctor` is usable as the health probe `command -v vox` can't be."""
+    status = {label: st for st, label, _ in rows}
+    if status.get("kokoro deps") == DOCTOR_OK and status.get("platform") == DOCTOR_OK:
+        return 0, "vox can speak with the neural voice."
+    if status.get("say fallback") == DOCTOR_OK:
+        return 0, "vox can speak, but only with the system `say` voice."
+    return 1, "vox cannot speak on this machine."
+
+
+def _print_doctor() -> int:
+    rows = _doctor_rows()
+    code, summary = _doctor_verdict(rows)
+    print("vox doctor\n")
+    for status, label, detail in rows:
+        print(f"  {status:<4}  {label:<12}  {detail}")
+    print(f"\n{summary}")
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vox",
@@ -817,6 +927,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-w", "--wait", action="store_true",
                    help="block until speech finishes (default: return once queued)")
     p.add_argument("-l", "--list-voices", action="store_true", help="list voices and exit")
+    p.add_argument("--doctor", action="store_true",
+                   help="check this install and exit (0 = can speak, 1 = cannot)")
     p.add_argument("--add-voice", nargs=2, metavar=("NAME", "FILE"),
                    help="clone a voice from an audio clip (10–20 s of clean speech, "
                         "with the speaker's consent) and exit")
@@ -840,6 +952,9 @@ def main(argv=None) -> int:
 
     if args.serve:
         return run_daemon(engine=args.engine)
+
+    if args.doctor:
+        return _print_doctor()
 
     if args.list_voices:
         _print_voices()

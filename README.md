@@ -182,6 +182,7 @@ vox [text...]              text to speak; a file path is read aloud ('-'/pipe = 
   -s, --speed X            speaking speed 0.5–2.0 (default: 1.1); cloned voices ignore it
   -w, --wait               block until speech finishes (default: return once queued)
   -l, --list-voices        list voices and exit
+      --doctor             check this install and exit (0 = can speak, 1 = cannot)
       --add-voice NAME FILE
                            clone a voice from an audio clip and exit
       --remove-voice NAME  delete a cloned voice and exit
@@ -196,6 +197,27 @@ vox [text...]              text to speak; a file path is read aloud ('-'/pipe = 
 By default `vox` returns as soon as the text is queued, so an agent can say
 "I need your input" and immediately go back to waiting for you. Use `--wait`
 when you need the call to block until the words have been spoken.
+
+### When it goes quiet
+
+The `command -v vox` guard is what makes the agent pattern safe, but it only
+proves a file is executable — not that the venv behind it still imports. A
+half-broken install therefore doesn't complain, it just stops talking. That's
+what `--doctor` is for:
+
+```sh
+vox --doctor
+```
+
+It checks the interpreter, the architecture, the Kokoro imports, whether the
+model is already downloaded, and whether `say` is there to fall back on — and
+it never triggers the model download just to answer. It exits 0 whenever vox
+can speak at all (even if only via `say`) and 1 when nothing can, so it works
+as a real health check in a script.
+
+It also reports which checkout `vox` on your PATH actually runs. If you keep a
+working copy as well as an installed one, they share that single launcher, and
+`--doctor` is the fastest way to see which tree you're really executing.
 
 ## MCP server
 
