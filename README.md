@@ -115,7 +115,7 @@ vox --remove-voice me
 > **Heads up: cloned and built-in MOSS voices cost a lot more than the default ones.**
 > The stock Kokoro voices run on the GPU for a fraction of a second and the daemon
 > sits at 150–450 MB. A MOSS voice (yours, or `Ava`, `Nathan`, …) runs on the CPU:
-> about 2–2.5 cores for as long as it is talking, and the daemon holds **~1.4 GB of
+> roughly one to two cores for as long as it is talking, and the daemon holds **~1.4 GB of
 > memory** until it exits after 10 idle minutes (`vox --quit` frees it now). Measured
 > on an M3 MacBook Air with 16 GB: a one-sentence alert is a short burst you won't
 > notice; reading a long document keeps the CPU busy for the whole reading and will

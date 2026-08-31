@@ -49,7 +49,8 @@ REQUIRED = (("onnxruntime", "onnxruntime>=1.20"), ("soundfile", "soundfile"),
 
 # Tuning, measured on an M3 MacBook Air (16 GB) 2026-08-30. Each generated frame is
 # 80 ms of audio; real time needs generation + decode under that.
-THREADS = 4          # 2/3/4 ORT threads were equivalent (RTF 0.34–0.38); 6 was slower (0.58)
+THREADS = 2          # 2 threads with spinning off: fastest measured (RTF 0.53) at 1.8 cores of CPU;
+                     # upstream's 4 spinning threads: RTF 0.80 at 4.8 cores. Laptops thank you.
 MAX_TOKENS = 48      # text tokens per chunk; 75 (upstream default) drifted into babble on a
                      # 97-word paragraph (WER 26 %), 48 gave 0 %
 DECODE_FRAMES = 4    # frames per codec call: one call costs ~45 ms for 1 frame, ~60 ms for 4
@@ -279,6 +280,18 @@ def load_runtime(quiet: bool = False):
     from vendor.moss_tts_nano.onnx_tts_runtime import OnnxTtsRuntime, _find_manifest_path  # noqa: WPS433
 
     class LeanRuntime(OnnxTtsRuntime):
+        def _session(self, path_value):
+            """Upstream's session, minus busy-spinning worker threads: spinning burns
+            2–4× the CPU for no speed on a laptop, and loses outright once anything
+            else wants the cores."""
+            import onnxruntime as ort  # noqa: WPS433
+            options = ort.SessionOptions()
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            options.intra_op_num_threads = self.thread_count
+            options.inter_op_num_threads = 1
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            return ort.InferenceSession(str(path_value), sess_options=options, providers=self.ort_providers)
+
         def _create_sessions(self):
             tts_dir, codec_dir = self.tts_meta_path.parent, self.codec_meta_path.parent
             files, cfiles = self.tts_meta["files"], self.codec_meta["files"]
