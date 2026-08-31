@@ -9,3 +9,7 @@ spacy            # tokenizer misaki depends on
 phonemizer       # phoneme backend
 espeakng-loader  # bundles the espeak-ng binary (no `brew install` needed)
 numpy            # array handling + wav encoding
+
+# Cloned voices (vox --add-voice) need onnxruntime, soundfile, sounddevice,
+# sentencepiece and huggingface_hub on top of these. They are installed into the
+# venv on demand by the first --add-voice, not here — see vox_moss.py.

@@ -9,6 +9,9 @@ uses; default `af_bella`) running through mlx-audio on Apple Silicon. Anywhere
 that isn't available, it falls back to the built-in macOS `say` voice so it
 still works — quality drops, but it never goes silent.
 
+Your own voice is opt-in: `vox --add-voice NAME clip.m4a` clones it from a short
+recording (MOSS-TTS-Nano, CPU, see vox_moss.py) and `-v NAME` speaks with it.
+
 A small daemon starts itself on first use and keeps the model warm, so repeat
 calls are near-instant and never talk over each other (everything goes through
 one playback queue). Pass --no-daemon to synthesize inline instead.
@@ -51,6 +54,7 @@ VOICES = {
     "am_puck":    "male, American, playful",
 }
 DEFAULT_VOICE = "af_bella"
+ENGINES = ("auto", "kokoro", "moss", "say")   # moss = cloned voices (vox_moss.py)
 DEFAULT_SPEED = 1.1          # 1.0 = natural pace; >1 = snappier
 SPEED_MIN, SPEED_MAX = 0.5, 2.0
 
@@ -127,6 +131,7 @@ class Engine:
         self._play_lock = threading.Lock()
         self._current: subprocess.Popen | None = None
         self._interrupt = threading.Event()
+        self._moss = None                          # MossEngine, created on first cloned-voice use
 
     # -- Kokoro loading ----------------------------------------------------- #
 
@@ -153,11 +158,36 @@ class Engine:
 
     @property
     def name(self) -> str:
+        if self._moss is not None and self._moss.loaded:
+            return "moss+kokoro" if self._tts is not None else "moss"
         if self._tts is not None:
             return "kokoro"
         if self._kokoro_broken:
             return "say"
         return "kokoro?" if self.mode != "say" else "say"
+
+    # -- Cloned voices (MOSS) ----------------------------------------------- #
+
+    @staticmethod
+    def _use_moss(mode: str, voice: str, moss_voice: bool) -> bool:
+        """Route a request to the cloned-voice engine? `moss_voice` says whether
+        `voice` is one of its (an installed clip or a built-in preset). --engine
+        moss forces it; auto picks it for its voices and never for a stock id."""
+        if mode == "moss":
+            return True
+        return mode == "auto" and voice not in VOICES and moss_voice
+
+    def _speak_moss(self, text: str, voice: str, speed: float) -> bool:
+        """Speak via the cloned-voice engine. False means it couldn't (deps,
+        model, unknown voice) and the caller should use another voice."""
+        try:
+            if self._moss is None:
+                import vox_moss                                  # noqa: WPS433
+                self._moss = vox_moss.MossEngine(quiet=self.quiet, interrupt=self._interrupt)
+            return self._moss.speak(text, voice, speed)
+        except Exception as exc:                                  # noqa: BLE001
+            _eprint(f"vox: cloned voice failed ({exc}).", self.quiet)
+            return False
 
     # -- Text chunking ------------------------------------------------------ #
 
@@ -280,25 +310,36 @@ class Engine:
         """Interrupt speech right now: signal any in-flight speak() to bail and
         kill the playing process (no-op if silent)."""
         self._interrupt.set()
+        if self._moss is not None:
+            self._moss.stop()
         with self._play_lock:
             if self._current and self._current.poll() is None:
                 self._current.terminate()
 
     # -- Public ------------------------------------------------------------- #
 
-    def speak(self, text: str, voice: str, speed: float) -> None:
+    def speak(self, text: str, voice: str, speed: float, mode: str | None = None) -> None:
         """Speak `text`, blocking until it finishes. Long text is chunked and
         synthesized one piece ahead while the previous piece plays, so there's
         no long pause between sentences. A chunk that Kokoro can't synthesize
         falls back to `say` for that chunk only — it never poisons the rest.
+        `mode` overrides the engine for this call (the daemon is started once
+        but each request carries its own --engine).
         """
         text = text.strip()
         if not text:
             return
         speed = clamp_speed(speed)
+        mode = mode or self.mode
         self._interrupt.clear()
+        if self._use_moss(mode, voice, _is_moss_voice(voice)):
+            if self._speak_moss(text, voice, speed) or self._interrupt.is_set():
+                return
+            _eprint(f"vox: using {DEFAULT_VOICE} instead.", self.quiet)
+        if voice not in VOICES:                   # never go silent: a name Kokoro doesn't know
+            voice = DEFAULT_VOICE                 # (e.g. a clip removed while the job was queued)
         chunks = self._chunk_text(text)
-        use_kokoro = self.mode != "say" and self._ensure_loaded()
+        use_kokoro = mode != "say" and self._ensure_loaded()
 
         if not use_kokoro:
             for chunk in chunks:
@@ -372,12 +413,13 @@ class Engine:
 # --------------------------------------------------------------------------- #
 
 class _Job:
-    __slots__ = ("text", "voice", "speed", "done")
+    __slots__ = ("text", "voice", "speed", "mode", "done")
 
-    def __init__(self, text, voice, speed):
+    def __init__(self, text, voice, speed, mode=None):
         self.text = text
         self.voice = voice
         self.speed = speed
+        self.mode = mode
         self.done = threading.Event()
 
 
@@ -403,7 +445,7 @@ class Daemon:
             if job is None:
                 return
             try:
-                self.engine.speak(job.text, job.voice, job.speed)
+                self.engine.speak(job.text, job.voice, job.speed, mode=job.mode)
             except Exception:                                 # noqa: BLE001
                 pass
             finally:
@@ -442,7 +484,9 @@ class Daemon:
             text = (req.get("text") or "").strip()
             if not text:
                 return {"ok": False, "error": "empty text"}
-            job = _Job(text, req.get("voice", DEFAULT_VOICE), req.get("speed", DEFAULT_SPEED))
+            mode = req.get("engine")
+            job = _Job(text, req.get("voice", DEFAULT_VOICE), req.get("speed", DEFAULT_SPEED),
+                       mode if mode in ENGINES else None)
             self.jobs.put(job)
             if req.get("wait"):
                 job.done.wait()
@@ -518,6 +562,34 @@ def _safe_unlink(path: str) -> None:
         os.unlink(path)
     except FileNotFoundError:
         pass
+
+
+def _moss():
+    """The cloned-voice module, or None if it can't be imported. It imports only
+    the standard library at module level, so this is cheap and the Kokoro path
+    never depends on it."""
+    try:
+        import vox_moss                                          # noqa: WPS433
+        return vox_moss
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def _is_moss_voice(voice: str) -> bool:
+    """An installed cloned voice or one of the cloning engine's built-in presets."""
+    m = _moss()
+    return bool(m and m.is_moss_voice(voice))
+
+
+def custom_voices() -> dict:
+    """{name: description} for the cloning engine's voices: installed clips first,
+    then its built-in presets. Empty when the module is unavailable."""
+    m = _moss()
+    if m is None:
+        return {}
+    out = {name: "cloned voice" for name in m.list_voices()}
+    out.update({name: "built-in voice of the cloning engine" for name in m.BUILTIN_PRESETS})
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -598,7 +670,7 @@ def speak_via_daemon(text, voice, speed, wait, engine, quiet) -> bool:
     # headroom so we never time out mid-sentence and re-speak inline.
     timeout = 600.0 if wait else 10.0
     resp = _request({"cmd": "speak", "text": text, "voice": voice,
-                     "speed": speed, "wait": wait}, timeout=timeout)
+                     "speed": speed, "wait": wait, "engine": engine}, timeout=timeout)
     return bool(resp and resp.get("ok"))
 
 
@@ -660,7 +732,16 @@ def _print_voices() -> None:
     print("Available voices (default: %s):\n" % DEFAULT_VOICE)
     for vid, desc in VOICES.items():
         print(f"  {vid:<11} {desc}")
-    print("\nAny Mac also has the built-in `say` voices; set SPEAK_SAY_VOICE to pick one.")
+    m = _moss()
+    clips = list(m.list_voices()) if m else []
+    if clips:
+        print("\nYour voices (cloned):\n")
+        for name in clips:
+            print(f"  {name}")
+    print("\nClone your own: vox --add-voice NAME clip.m4a   (10–20 s of clean speech)")
+    if m:
+        print("Built-in voices of the cloning engine (CPU): " + ", ".join(m.BUILTIN_PRESETS))
+    print("Any Mac also has the built-in `say` voices; set SPEAK_SAY_VOICE to pick one.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -672,6 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  vox \"Build finished — all green.\"\n"
             "  vox -v am_onyx -s 0.95 \"Heads up, I need your input.\"\n"
+            "  vox --add-voice me ~/clip.m4a && vox -v me \"In my own voice.\"\n"
             "  vox notes.md           # read a file aloud (Markdown stripped)\n"
             "  echo \"piped text\" | vox\n"
             "  vox --stop             # cut off whatever is talking\n"
@@ -689,13 +771,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-w", "--wait", action="store_true",
                    help="block until speech finishes (default: return once queued)")
     p.add_argument("-l", "--list-voices", action="store_true", help="list voices and exit")
+    p.add_argument("--add-voice", nargs=2, metavar=("NAME", "FILE"),
+                   help="clone a voice from an audio clip (10–20 s of clean speech) and exit")
+    p.add_argument("--remove-voice", metavar="NAME", help="delete a cloned voice and exit")
     p.add_argument("--stop", action="store_true", help="stop current speech and clear the queue")
     p.add_argument("--quit", action="store_true",
                    help="shut down the background voice daemon (frees the model from memory)")
     p.add_argument("--no-daemon", action="store_true",
                    help="synthesize inline instead of using the warm daemon")
-    p.add_argument("--engine", choices=["auto", "kokoro", "say"], default="auto",
-                   help="auto (default) = Kokoro if available, else system voice")
+    p.add_argument("--engine", choices=list(ENGINES), default="auto",
+                   help="auto (default) = Kokoro, or the cloned voice when -v names one; "
+                        "moss = cloned-voice engine; say = system voice")
     p.add_argument("-q", "--quiet", action="store_true", help="suppress status messages")
     p.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)  # internal
     return p
@@ -710,6 +796,21 @@ def main(argv=None) -> int:
     if args.list_voices:
         _print_voices()
         return 0
+
+    if args.add_voice or args.remove_voice:
+        import vox_moss                                          # noqa: WPS433
+        try:
+            if args.add_voice:
+                name, src = args.add_voice
+                path = vox_moss.add_voice(name, src, quiet=args.quiet, reserved=VOICES)
+                _eprint(f"vox: voice '{name}' ready ({path}). Try: vox -v {name} \"Hello.\"", args.quiet)
+            else:
+                gone = vox_moss.remove_voice(args.remove_voice)
+                _eprint(f"vox: voice '{args.remove_voice}' " + ("removed." if gone else "not found."), args.quiet)
+            return 0
+        except Exception as exc:                                  # noqa: BLE001
+            _eprint(f"vox: {exc}", args.quiet)
+            return 2
 
     if args.stop:
         _request({"cmd": "stop"})          # silently no-op if no daemon
@@ -729,9 +830,16 @@ def main(argv=None) -> int:
         _eprint("vox: nothing to say (give text, a file, pipe stdin, or use --list-voices).", args.quiet)
         return 2
 
-    if args.voice not in VOICES and args.engine != "say":
+    moss_voice = args.voice not in VOICES and _is_moss_voice(args.voice)
+    if args.voice not in VOICES and not moss_voice and args.engine not in ("say", "moss"):
         _eprint(f"vox: unknown voice '{args.voice}'. Try --list-voices.", args.quiet)
         return 2
+    if Engine._use_moss(args.engine, args.voice, moss_voice):
+        # Cloned voices need a few extra packages; install them here, in the
+        # foreground, rather than from inside the daemon.
+        m = _moss()
+        if m is not None:
+            m.ensure_deps(quiet=args.quiet)
 
     speed = clamp_speed(args.speed)
     _eprint(f"vox: \"{text[:60]}{'…' if len(text) > 60 else ''}\"", args.quiet)

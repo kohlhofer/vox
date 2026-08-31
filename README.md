@@ -100,6 +100,38 @@ vox -v am_onyx -s 0.95 "Heads up, I need your input on the migration."
 | `am_onyx` | male, American, deep |
 | `am_puck` | male, American, playful |
 
+## Your own voice
+
+vox can speak in *your* voice, cloned from a short recording. It's opt-in: until you
+add a voice nothing changes — no extra packages, no model download, no memory.
+
+```sh
+vox --add-voice me ~/clips/me-reading-a-paragraph.m4a   # once (10–20 s of clean speech)
+vox -v me "The build is green. Two tests failed."        # from then on
+vox --list-voices                                        # stock voices + yours
+vox --remove-voice me
+```
+
+The first `--add-voice` installs a few packages into vox's own venv (~80 MB,
+mostly [onnxruntime](https://onnxruntime.ai)) and downloads the
+[MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) model (~730 MB, into
+`~/.cache/vox/models/`). Any audio format works if `ffmpeg` is installed
+(`brew install ffmpeg`); without it, hand vox a 48 kHz WAV.
+
+How it works: the clip is trimmed, peak-normalized (a quiet recording clones
+noticeably worse), stored under `~/.config/vox/voices/`, and encoded once into
+audio tokens that are prepended to every generation as a prompt. Nothing is
+trained; a new voice is just another clip, and your voices never leave the
+machine. Speech streams to the speaker while it's generated — first sound in well
+under a second on Apple silicon, running on the CPU. `--speed` doesn't apply to
+cloned voices (the model has no tempo control). If the cloned voice can't load,
+vox says so and uses the default Kokoro voice instead of going silent.
+
+The cloning model also brings its own built-in voices — `vox -v Ava "…"`,
+`Nathan`, `Adam`, `Bella`, … (`--list-voices` shows them all). Cloned voices run at
+about 1.3 GB of memory while the daemon is warm; it exits after 10 idle minutes
+like always. Tuning notes and measurements are in `vox_moss.py`.
+
 ## Why it's fast (the daemon)
 
 The first `vox` call starts a small background daemon that keeps the voice model
@@ -138,10 +170,12 @@ vox [text...]              text to speak; a file path is read aloud ('-'/pipe = 
   -s, --speed X            speaking speed 0.5–2.0 (default: 1.1)
   -w, --wait               block until speech finishes (default: return once queued)
   -l, --list-voices        list voices and exit
+      --add-voice NAME FILE clone a voice from an audio clip and exit
+      --remove-voice NAME   delete a cloned voice and exit
       --stop               stop current speech and clear the queue
       --quit               shut down the background voice daemon
       --no-daemon          synthesize inline instead of using the warm daemon
-      --engine {auto,kokoro,say}
+      --engine {auto,kokoro,moss,say}
   -q, --quiet              suppress status messages
 ```
 
@@ -178,10 +212,14 @@ Then register it (stdio transport), e.g. in `claude_desktop_config.json`:
   `say` fallback.
 - `SPEAK_SAY_VOICE=Daniel vox --engine say "…"` picks a system voice for the
   fallback path.
-- Runtime state (socket, log) lives under `~/.cache/vox/`.
+- Runtime state (socket, log) lives under `~/.cache/vox/`; cloned voices under
+  `~/.config/vox/voices/` (override with `VOX_VOICES_DIR`); the cloning model
+  under `~/.cache/vox/models/` (`VOX_MODELS_DIR`).
 
 ## License
 
 [MIT](LICENSE) © Alexander Kohlhofer. The Kokoro-82M model and its voices are
 distributed under their own licenses — see
-[hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M).
+[hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Voice cloning
+uses MOSS-TTS-Nano (Apache-2.0); its ONNX runtime is vendored under
+`vendor/moss_tts_nano/` — see the `NOTICE.md` there.

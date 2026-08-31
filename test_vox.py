@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Unit tests for vox's pure text handling — Markdown cleaning and chunking.
-No Kokoro / audio needed. Run: ./.venv/bin/python test_vox.py  (or pytest)."""
+"""Unit tests for vox's pure logic — Markdown cleaning, chunking, and cloned-voice
+routing. No Kokoro / MOSS / audio needed. Run: ./.venv/bin/python test_vox.py  (or pytest)."""
+
+import tempfile
+import threading
+from pathlib import Path
+
+import numpy as np
 
 import vox
+import vox_moss
 
 
 def test_clean_markdown_strips_structure():
@@ -57,6 +64,188 @@ def test_chunk_does_not_merge_across_paragraphs():
 
 def test_chunk_short_text_is_single_chunk():
     assert vox.Engine._chunk_text("Hello there.") == ["Hello there."]
+
+
+# -- cloned voices (vox_moss) ------------------------------------------------ #
+
+def test_voice_name_rules():
+    for ok in ("alex", "alex-calm", "me_2", "a", "x" * 32):
+        assert vox_moss.validate_name(ok) == ok
+    for bad in ("", "Alex", "my voice", "../x", "a.b", "-lead", "x" * 33, "af bella"):
+        try:
+            vox_moss.validate_name(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected {bad!r} to be rejected")
+
+
+def test_list_voices_only_sees_wav_clips():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "alex.wav").write_bytes(b"")
+        (d / "bea.wav").write_bytes(b"")
+        (d / "alex.abc123.codes.json").write_text("[]")      # cache, not a voice
+        (d / "notes.txt").write_text("")
+        (d / "Bad Name.wav").write_bytes(b"")                 # invalid name is ignored
+        assert list(vox_moss.list_voices(d)) == ["alex", "bea"]
+        assert vox_moss.is_custom_voice("alex", d) and not vox_moss.is_custom_voice("zed", d)
+    assert vox_moss.list_voices(Path("/nonexistent/vox-voices")) == {}
+
+
+def test_remove_voice_deletes_clip_and_cache():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "alex.wav").write_bytes(b"")
+        (d / "alex.abc123.codes.json").write_text("[]")
+        assert vox_moss.remove_voice("alex", d) is True
+        assert not any(d.iterdir())
+        assert vox_moss.remove_voice("alex", d) is False   # already gone
+
+
+def test_engine_routing():
+    route = vox.Engine._use_moss                              # (mode, voice, is a moss voice?)
+    assert route("auto", "af_bella", False) is False         # stock Kokoro voice
+    assert route("auto", "alex", True) is True               # installed clip
+    assert route("auto", "Ava", True) is True                # built-in preset, no --engine needed
+    assert route("auto", "alex", False) is False             # unknown name: not ours
+    assert route("auto", "af_bella", True) is False          # a stock id always wins in auto
+    assert route("moss", "af_bella", False) is True          # forced engine
+    assert route("kokoro", "alex", True) is False
+    assert route("say", "alex", True) is False
+
+
+def test_presets_are_moss_voices_but_not_custom():
+    assert vox_moss.is_preset("Ava") and not vox_moss.is_preset("ava")
+    with tempfile.TemporaryDirectory() as d:
+        assert vox_moss.is_moss_voice("Ava", Path(d)) and not vox_moss.is_custom_voice("Ava", Path(d))
+
+
+def test_speak_falls_back_to_default_voice_when_moss_fails():
+    """The 'never silent' promise, end to end through Engine.speak with every
+    external effect stubbed: MOSS says it couldn't, Kokoro must be asked for the
+    default voice, and nothing real is synthesized or played."""
+    eng = vox.Engine(engine="moss", quiet=True)
+    eng._speak_moss = lambda text, voice, speed: False
+    eng._ensure_loaded = lambda: True
+    eng._np = np
+    asked = []
+    eng._synth_kokoro = lambda text, voice, speed: (asked.append(voice), (np.zeros(0, dtype=np.float32), 24_000))[1]
+    eng._say = lambda text, speed: None                     # empty samples route here; stubbed
+    eng.speak("hello there", "alex", 1.0)
+    assert asked == [vox.DEFAULT_VOICE]
+
+
+def test_speak_does_not_replay_when_moss_spoke():
+    eng = vox.Engine(engine="auto", quiet=True)
+    eng._speak_moss = lambda text, voice, speed: True
+    eng._ensure_loaded = lambda: (_ for _ in ()).throw(AssertionError("Kokoro must not load"))
+    real = vox._is_moss_voice
+    vox._is_moss_voice = lambda v: v == "alex"
+    try:
+        eng.speak("hello", "alex", 1.0)
+    finally:
+        vox._is_moss_voice = real
+
+
+def test_player_pads_silence_on_underrun_and_drains():
+    p = vox_moss._Player.__new__(vox_moss._Player)          # no real audio device
+    p.lock = threading.Lock()
+    p.buf = [np.ones((3, 2), dtype=np.float32)]
+    p.buffered = 3
+    out = np.zeros((5, 2), dtype=np.float32)
+    p._cb(out, 5, None, None)
+    assert (out[:3] == 1.0).all() and (out[3:] == 0.0).all()   # underrun -> silence
+    assert p.buf == [] and p.buffered == 0
+
+
+def test_player_starts_only_after_prebuffer():
+    class FakeStream:
+        started = 0
+        def start(self): self.started += 1
+        def stop(self): pass
+        def abort(self): pass
+        def close(self): pass
+    p = vox_moss._Player.__new__(vox_moss._Player)
+    p.sr, p.ch, p.prebuffer = 48_000, 2, 100
+    p.lock, p.buf, p.buffered = threading.Lock(), [], 0
+    p.aborted = p._started = p._closed = False
+    p.stream = FakeStream()
+    p.push(np.zeros((60, 2), dtype=np.float32))
+    assert p.stream.started == 0                             # 60 < 100 queued: wait
+    p.push(np.zeros((60, 2), dtype=np.float32))
+    assert p.stream.started == 1                             # 120 >= 100: go
+    p.push(np.zeros((60, 2), dtype=np.float32))
+    assert p.stream.started == 1                             # never restarted
+    p.abort()
+    p.finish()                                               # no-op after abort, no error
+
+
+def test_add_voice_rejects_reserved_and_bad_clips_without_side_effects():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "alex.wav").write_bytes(b"old-good-clip")
+        src = d / "src.m4a"; src.write_bytes(b"x")
+        orig = (vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child)
+        vox_moss._convert_clip = lambda source, dest: dest.write_bytes(b"short")
+        vox_moss._clip_seconds = lambda path: 1.0            # < MIN_CLIP_SECONDS
+        vox_moss.ensure_deps = lambda **kw: True
+        vox_moss._encode_in_child = lambda wav: (_ for _ in ()).throw(AssertionError("must not encode"))
+        try:
+            for name, err in (("af_bella", "stock voice"), ("alex", "at least")):
+                try:
+                    vox_moss.add_voice(name, src, quiet=True, voices_dir=d, reserved={"af_bella"})
+                except ValueError as exc:
+                    assert err in str(exc)
+                else:
+                    raise AssertionError(f"{name}: expected ValueError")
+            assert (d / "alex.wav").read_bytes() == b"old-good-clip"     # untouched
+            assert not any(".tmp" in q.name for q in d.iterdir())
+        finally:
+            vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child = orig
+
+
+def test_add_voice_removes_clip_when_encode_fails():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        src = d / "src.m4a"; src.write_bytes(b"x")
+        orig = (vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child)
+        vox_moss._convert_clip = lambda source, dest: dest.write_bytes(b"ok")
+        vox_moss._clip_seconds = lambda path: 12.0
+        vox_moss.ensure_deps = lambda **kw: True
+        vox_moss._encode_in_child = lambda wav: (_ for _ in ()).throw(RuntimeError("encoder exploded"))
+        try:
+            try:
+                vox_moss.add_voice("alex", src, quiet=True, voices_dir=d)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("expected the encode failure to propagate")
+            assert not vox_moss.is_custom_voice("alex", d)          # nothing half-installed
+        finally:
+            vox_moss._convert_clip, vox_moss._clip_seconds, vox_moss.ensure_deps, vox_moss._encode_in_child = orig
+
+
+def test_parser_voice_management_flags():
+    p = vox.build_parser()
+    a = p.parse_args(["--add-voice", "alex", "clip.m4a"])
+    assert a.add_voice == ["alex", "clip.m4a"]
+    assert p.parse_args(["--remove-voice", "alex"]).remove_voice == "alex"
+    assert p.parse_args(["--engine", "moss", "hi"]).engine == "moss"
+
+
+def test_lazy_sessions_build_on_first_access():
+    built = []
+    lazy = vox_moss._LazySessions({"a": 1}, {"b": "path-b"}, lambda path: built.append(path) or 2)
+    assert "a" in lazy and "b" in lazy and "c" not in lazy
+    assert lazy["a"] == 1 and built == []
+    assert lazy["b"] == 2 and built == ["path-b"]
+    assert lazy["b"] == 2 and built == ["path-b"]            # built once
+    try:
+        lazy["c"]
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unknown session should raise KeyError")
 
 
 if __name__ == "__main__":

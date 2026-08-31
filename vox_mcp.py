@@ -53,7 +53,7 @@ def stop() -> str:
 @mcp.tool()
 def list_voices() -> dict:
     """List available neural voice ids and their descriptions."""
-    return dict(vox.VOICES)
+    return {**vox.VOICES, **vox.custom_voices()}
 
 
 if __name__ == "__main__":
