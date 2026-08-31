@@ -40,7 +40,8 @@ def speak_text(text: str, voice: str = vox.DEFAULT_VOICE,
     ok = vox.speak_via_daemon(text, voice, vox.clamp_speed(speed), wait, "auto", quiet=True)
     if not ok:
         vox.Engine(engine="auto", quiet=True).speak(text, voice, vox.clamp_speed(speed))
-    return f"spoke: {text[:80]}"
+        return f"spoke: {text[:80]}"          # the inline path blocks until done
+    return f"{'spoke' if wait else 'queued'}: {text[:80]}"
 
 
 @mcp.tool()
