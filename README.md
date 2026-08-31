@@ -49,7 +49,7 @@ First run downloads the model (~160MB) and is slow. After that it's fast.
 ### 2. Tell your agent when to speak
 
 The command alone isn't enough — the agent needs a rule for *when* a spoken note
-is worth it, or it either stays silent or talks over every step. The
+is worth it, or it stays silent or talks over every step. The
 [`integrations/`](integrations/) directory has ready-to-paste guidance that
 encodes that rule (speak whenever you hand the turn back — done, blocked, broke,
 or about to go quiet; one short sentence; lead with which job; headline only,
@@ -59,9 +59,8 @@ differs.
 **Claude Code** is the setup I use. Paste the body of
 [`claude-code/CLAUDE.md.snippet`](integrations/claude-code/CLAUDE.md.snippet)
 into your global `~/.claude/CLAUDE.md` (or a project `CLAUDE.md`). Putting it in
-`CLAUDE.md` keeps it always in context, which fires far more reliably for
-proactive "alert me" behavior than a skill that only loads when the model thinks
-it's relevant. There's also a [skill](integrations/claude-code/skills/vox/) if
+`CLAUDE.md` keeps it always in context, which fires far more reliably than a
+skill that only loads when the model thinks it's relevant. There's also a [skill](integrations/claude-code/skills/vox/) if
 you'd rather install it that way:
 
 ```sh
@@ -100,48 +99,8 @@ vox -v am_onyx -s 0.95 "Heads up, I need your input on the migration."
 | `am_onyx` | male, American, deep |
 | `am_puck` | male, American, playful |
 
-## Your own voice
-
-vox can speak in *your* voice, cloned from a short recording. It's opt-in: until you
-add a voice nothing changes — no extra packages, no model download, no memory.
-
-```sh
-vox --add-voice me ~/clips/me-reading-a-paragraph.m4a   # once (10–20 s of clean speech)
-vox -v me "The build is green. Two tests failed."        # from then on
-vox --list-voices                                        # stock voices + yours
-vox --remove-voice me
-```
-
-> **Heads up: cloned and built-in MOSS voices cost a lot more than the default ones.**
-> The stock Kokoro voices run on the GPU for a fraction of a second and the daemon
-> sits at 150–450 MB. A MOSS voice (yours, or `Ava`, `Nathan`, …) runs on the CPU:
-> roughly one to two cores for as long as it is talking, and the daemon holds **~1.4 GB of
-> memory** while the model is loaded. It drops the model after 2 idle minutes (the next
-> cloned-voice call pays ~2 s to reload; `vox --quit` frees everything now). Measured
-> on an M3 MacBook Air with 16 GB: a one-sentence alert is a short burst you won't
-> notice; reading a long document keeps the CPU busy for the whole reading and will
-> warm a fanless machine. Use your voice for the lines you want to *sound* like you,
-> and the default voice for bulk reading or when the machine is already busy.
-
-The first `--add-voice` installs a few packages into vox's own venv (~80 MB,
-mostly [onnxruntime](https://onnxruntime.ai)) and downloads the
-[MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) model (~730 MB, into
-`~/.cache/vox/models/`). Any audio format works if `ffmpeg` is installed
-(`brew install ffmpeg`); without it, hand vox a 48 kHz WAV.
-
-How it works: the clip is trimmed, peak-normalized (a quiet recording clones
-noticeably worse), stored under `~/.config/vox/voices/`, and encoded once into
-audio tokens that are prepended to every generation as a prompt. Nothing is
-trained; a new voice is just another clip, and your voices never leave the
-machine. Speech streams to the speaker while it's generated — first sound in well
-under a second on Apple silicon, running on the CPU. `--speed` doesn't apply to
-cloned voices (the model has no tempo control). If the cloned voice can't load,
-vox says so and uses the default Kokoro voice instead of going silent.
-
-The cloning model also brings its own built-in voices — `vox -v Ava "…"`,
-`Nathan`, `Adam`, `Bella`, … (`--list-voices` shows them all). Cloned voices run at
-about 1.3 GB of memory while the daemon is warm; it exits after 10 idle minutes
-like always. Tuning notes and measurements are in `vox_moss.py`.
+vox can also speak in cloned voices — including your own. See
+[Your own voice](#your-own-voice) below.
 
 ## Why it's fast (the daemon)
 
@@ -156,6 +115,48 @@ You rarely need to think about it. If you want to:
 - `vox --stop` — interrupt current speech and clear the queue (daemon stays warm).
 - `vox --quit` — shut the daemon down now and free the model from memory.
 - Daemon log lives at `~/.cache/vox/daemon.log`.
+
+## Your own voice
+
+vox can speak in *your* voice, cloned from a short recording. It's opt-in: until
+you add a voice, nothing changes — no extra packages, no model download, no
+extra memory. One ground rule: clone only voices whose speaker has agreed to it.
+
+```sh
+vox --add-voice me ~/clips/me-reading-a-paragraph.m4a   # once (10–20 s of clean speech)
+vox -v me "The build is green. Two tests failed."        # from then on
+vox --list-voices                                        # stock voices, yours, and the built-in ones
+vox --remove-voice me
+```
+
+The cloning model also ships built-in voices of its own — `vox -v Ava`,
+`Nathan`, … (`--list-voices` names them all). They need the same one-time setup,
+which `--add-voice` does; to use only built-in voices, force it once with
+`--engine clone`.
+
+> **Heads up: cloned and built-in voices run on the CPU and cost real memory.**
+> One or two cores for as long as one is talking, and about 1.4 GB held while
+> the model is loaded — the stock voices take a fraction of a second on the GPU
+> and 150–450 MB. A one-sentence alert is a burst you won't notice; reading a
+> long document keeps the CPU busy for the whole read and will warm a fanless
+> MacBook. The model unloads after 2 idle minutes (`vox --quit` frees it now;
+> the next cloned-voice call pays ~2 s to reload). Use your voice for the lines
+> that should sound like you, and the default voice for bulk reading.
+
+The first setup installs a few packages into vox's own venv (~80 MB, mostly
+[onnxruntime](https://onnxruntime.ai)) and downloads the
+[MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) model (~730 MB, into
+`~/.cache/vox/models/`). Any audio format works if `ffmpeg` is installed
+(`brew install ffmpeg`); without it, hand vox a 48 kHz WAV.
+
+How it works: the clip is trimmed, peak-normalized (a quiet recording clones
+noticeably worse), stored under `~/.config/vox/voices/`, and encoded once into
+audio tokens that are prepended to every generation as a prompt. Nothing is
+trained, and your voices never leave the machine. Speech streams to the speaker
+while it's generated — first sound in well under a second on Apple silicon.
+`--speed` doesn't apply to cloned voices (the model has no tempo control). If a
+cloned voice can't load, vox uses the default Kokoro voice instead of going
+silent. Tuning notes and measurements are in `vox_moss.py`.
 
 ## Reading files
 
@@ -177,22 +178,24 @@ paragraphs. `vox --stop` halts it mid-read.
 ```
 vox [text...]              text to speak; a file path is read aloud ('-'/pipe = stdin)
   -f, --file PATH          read this file aloud (Markdown stripped)
-  -v, --voice ID           voice id (default: af_bella)
-  -s, --speed X            speaking speed 0.5–2.0 (default: 1.1)
+  -v, --voice NAME         voice (default: af_bella; --list-voices shows all)
+  -s, --speed X            speaking speed 0.5–2.0 (default: 1.1); cloned voices ignore it
   -w, --wait               block until speech finishes (default: return once queued)
   -l, --list-voices        list voices and exit
-      --add-voice NAME FILE clone a voice from an audio clip and exit
-      --remove-voice NAME   delete a cloned voice and exit
+      --add-voice NAME FILE
+                           clone a voice from an audio clip and exit
+      --remove-voice NAME  delete a cloned voice and exit
       --stop               stop current speech and clear the queue
       --quit               shut down the background voice daemon
       --no-daemon          synthesize inline instead of using the warm daemon
-      --engine {auto,kokoro,moss,say}
+      --engine {auto,kokoro,clone,say}
+                           auto (default) picks by voice; the rest force an engine
   -q, --quiet              suppress status messages
 ```
 
 By default `vox` returns as soon as the text is queued, so an agent can say
 "I need your input" and immediately go back to waiting for you. Use `--wait`
-when you need the call to block until the words have actually been spoken.
+when you need the call to block until the words have been spoken.
 
 ## MCP server
 
@@ -226,6 +229,8 @@ Then register it (stdio transport), e.g. in `claude_desktop_config.json`:
 - Runtime state (socket, log) lives under `~/.cache/vox/`; cloned voices under
   `~/.config/vox/voices/` (override with `VOX_VOICES_DIR`); the cloning model
   under `~/.cache/vox/models/` (`VOX_MODELS_DIR`).
+- `VOX_MOSS_IDLE=<seconds>` tunes how long the cloning model stays loaded while
+  idle (default 120).
 
 ## License
 
