@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -262,12 +263,19 @@ class _LazySessions(dict):
 
     def __init__(self, eager: dict, lazy_paths: dict, builder):
         super().__init__(eager)
-        self._lazy_paths, self._builder = lazy_paths, builder
+        self._lazy_paths = lazy_paths
+        # A weak method: a strong bound method would make runtime -> sessions ->
+        # builder -> runtime a cycle, and the ~1.3 GB of sessions would outlive
+        # the runtime until some later garbage collection got around to it.
+        self._builder = weakref.WeakMethod(builder)
 
     def __missing__(self, key):
         if key not in self._lazy_paths:
             raise KeyError(key)
-        self[key] = self._builder(self._lazy_paths[key])
+        builder = self._builder()
+        if builder is None:
+            raise RuntimeError("runtime is closed")
+        self[key] = builder(self._lazy_paths[key])
         return self[key]
 
     def __contains__(self, key):
@@ -445,6 +453,15 @@ class MossEngine:
     @property
     def loaded(self) -> bool:
         return self._runtime is not None
+
+    def close(self) -> None:
+        """Release the model (ONNX sessions, prompt caches). Call with `_lock` held
+        or when nothing else can be speaking."""
+        rt, self._runtime = self._runtime, None
+        self._codes.clear()
+        if rt is not None:
+            rt.sessions.clear()
+            rt.codec_streaming_session = None
 
     def _ensure_loaded(self) -> bool:
         if self._runtime is not None:

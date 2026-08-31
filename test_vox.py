@@ -235,7 +235,11 @@ def test_parser_voice_management_flags():
 
 def test_lazy_sessions_build_on_first_access():
     built = []
-    lazy = vox_moss._LazySessions({"a": 1}, {"b": "path-b"}, lambda path: built.append(path) or 2)
+    class Runtime:                                            # the builder is a bound method,
+        def build(self, path):                                # held weakly so it can't pin the runtime
+            built.append(path); return 2
+    rt = Runtime()
+    lazy = vox_moss._LazySessions({"a": 1}, {"b": "path-b"}, rt.build)
     assert "a" in lazy and "b" in lazy and "c" not in lazy
     assert lazy["a"] == 1 and built == []
     assert lazy["b"] == 2 and built == ["path-b"]
@@ -246,6 +250,21 @@ def test_lazy_sessions_build_on_first_access():
         pass
     else:
         raise AssertionError("unknown session should raise KeyError")
+
+
+def test_moss_unloads_only_when_idle_and_not_speaking():
+    class FakeMoss:
+        def __init__(self): self._lock = threading.Lock(); self.loaded = True
+    eng = vox.Engine(engine="auto", quiet=True)
+    assert eng.unload_moss_if_idle(timeout=10, now=1000.0) is False     # nothing loaded
+    eng._moss = FakeMoss(); eng._moss_last_used = 1000.0
+    assert eng.unload_moss_if_idle(timeout=10, now=1005.0) is False     # not idle long enough
+    assert eng._moss is not None
+    eng._moss._lock.acquire()                                            # "speaking"
+    assert eng.unload_moss_if_idle(timeout=10, now=1020.0) is False
+    eng._moss._lock.release()
+    assert eng.unload_moss_if_idle(timeout=10, now=1020.0) is True      # idle and free: dropped
+    assert eng._moss is None
 
 
 if __name__ == "__main__":

@@ -61,6 +61,9 @@ SPEED_MIN, SPEED_MAX = 0.5, 2.0
 SAY_BASE_WPM = 175           # macOS `say` baseline; scaled by speed for fallback
 
 IDLE_TIMEOUT = 600.0         # daemon exits after this many idle seconds
+MOSS_IDLE_TIMEOUT = float(os.environ.get("VOX_MOSS_IDLE") or 120.0)
+                             # cloned-voice model (~1.3 GB) is dropped after this many idle
+                             # seconds; Kokoro and the daemon stay warm, reload costs ~2 s
 STARTUP_TIMEOUT = 90.0       # client waits this long for a cold daemon (model dl)
 
 _RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache/vox")
@@ -132,6 +135,7 @@ class Engine:
         self._current: subprocess.Popen | None = None
         self._interrupt = threading.Event()
         self._moss = None                          # MossEngine, created on first cloned-voice use
+        self._moss_last_used = 0.0
 
     # -- Kokoro loading ----------------------------------------------------- #
 
@@ -180,6 +184,7 @@ class Engine:
     def _speak_moss(self, text: str, voice: str, speed: float) -> bool:
         """Speak via the cloned-voice engine. False means it couldn't (deps,
         model, unknown voice) and the caller should use another voice."""
+        self._moss_last_used = time.monotonic()
         try:
             if self._moss is None:
                 import vox_moss                                  # noqa: WPS433
@@ -188,6 +193,28 @@ class Engine:
         except Exception as exc:                                  # noqa: BLE001
             _eprint(f"vox: cloned voice failed ({exc}).", self.quiet)
             return False
+        finally:
+            self._moss_last_used = time.monotonic()
+
+    def unload_moss_if_idle(self, timeout: float = MOSS_IDLE_TIMEOUT, now: float | None = None) -> bool:
+        """Drop the cloned-voice engine (and its ~1.3 GB) once it has been idle for
+        `timeout` seconds. Never while it is speaking. Returns True if it unloaded."""
+        moss = self._moss
+        if moss is None:
+            return False
+        now = time.monotonic() if now is None else now
+        if now - self._moss_last_used < timeout:
+            return False
+        if not moss._lock.acquire(blocking=False):               # mid-sentence: try again later
+            return False
+        try:
+            self._moss = None
+            moss.close()
+        finally:
+            moss._lock.release()
+        import gc                                                # noqa: WPS433
+        gc.collect()
+        return True
 
     # -- Text chunking ------------------------------------------------------ #
 
@@ -455,6 +482,8 @@ class Daemon:
     def _idle_watch(self):
         while True:
             time.sleep(15.0)
+            if self.jobs.empty() and self.engine.unload_moss_if_idle():
+                _eprint("vox: cloned-voice model released after idling.")
             idle = time.monotonic() - self.last_active
             if idle > IDLE_TIMEOUT and self.jobs.empty() and self.engine._current is None:
                 _safe_unlink(SOCK_PATH)     # os._exit skips atexit; clean up first

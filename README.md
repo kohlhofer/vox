@@ -116,7 +116,8 @@ vox --remove-voice me
 > The stock Kokoro voices run on the GPU for a fraction of a second and the daemon
 > sits at 150–450 MB. A MOSS voice (yours, or `Ava`, `Nathan`, …) runs on the CPU:
 > roughly one to two cores for as long as it is talking, and the daemon holds **~1.4 GB of
-> memory** until it exits after 10 idle minutes (`vox --quit` frees it now). Measured
+> memory** while the model is loaded. It drops the model after 2 idle minutes (the next
+> cloned-voice call pays ~2 s to reload; `vox --quit` frees everything now). Measured
 > on an M3 MacBook Air with 16 GB: a one-sentence alert is a short burst you won't
 > notice; reading a long document keeps the CPU busy for the whole reading and will
 > warm a fanless machine. Use your voice for the lines you want to *sound* like you,
