@@ -254,7 +254,8 @@ def test_lazy_sessions_build_on_first_access():
 
 def test_moss_unloads_only_when_idle_and_not_speaking():
     class FakeMoss:
-        def __init__(self): self._lock = threading.Lock(); self.loaded = True
+        def __init__(self): self._lock = threading.Lock(); self.loaded = True; self.closed = False
+        def close(self): self.closed = True
     eng = vox.Engine(engine="auto", quiet=True)
     assert eng.unload_moss_if_idle(timeout=10, now=1000.0) is False     # nothing loaded
     eng._moss = FakeMoss(); eng._moss_last_used = 1000.0
@@ -263,8 +264,9 @@ def test_moss_unloads_only_when_idle_and_not_speaking():
     eng._moss._lock.acquire()                                            # "speaking"
     assert eng.unload_moss_if_idle(timeout=10, now=1020.0) is False
     eng._moss._lock.release()
+    fake = eng._moss
     assert eng.unload_moss_if_idle(timeout=10, now=1020.0) is True      # idle and free: dropped
-    assert eng._moss is None
+    assert eng._moss is None and fake.closed                             # and the model released
 
 
 if __name__ == "__main__":
